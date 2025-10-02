@@ -27,6 +27,19 @@ cd dasein-core
 pip install -e .
 ```
 
+## 📓 Try It Now in Colab
+
+**Zero setup required!** Try all three examples in your browser:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/nickswami/dasein-core/blob/main/examples/dasein_examples.ipynb)
+
+The interactive notebook includes:
+- 🗄️ **SQL Agent** - Learn query patterns (30-50% token reduction)
+- 🌐 **Browser Agent** - Optimize web navigation
+- 🔍 **Deep Research** - Multi-agent workflows (20-40% savings)
+
+---
+
 ## Quick Start
 
 ### Basic Usage
@@ -38,7 +51,7 @@ from langchain.agents import create_sql_agent
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
 
 # Create your agent as usual
-llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-exp")
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 toolkit = SQLDatabaseToolkit(db=your_database, llm=llm)
 agent = create_sql_agent(llm=llm, toolkit=toolkit, agent_type="tool-calling")
 
