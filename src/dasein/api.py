@@ -1688,6 +1688,10 @@ Follow these rules when planning your actions."""
             result = self._agent.invoke(*args, **kwargs)
             return result
         
+        # Reset callback handler state for fresh run
+        if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'reset_run_state'):
+            self._callback_handler.reset_run_state()
+        
         # Pre-run phase: Rule recall and selection
         selected_rules = self._pre_run_phase(query)
         
@@ -1752,6 +1756,10 @@ Follow these rules when planning your actions."""
             self._vprint(f"[DASEIN][NAIVE] Running in naive mode - no rule gathering or synthesis")
             result = await self._agent.ainvoke(*args, **kwargs)
             return result
+        
+        # Reset callback handler state for fresh run
+        if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'reset_run_state'):
+            self._callback_handler.reset_run_state()
         
         # Pre-run phase: Rule recall and selection
         selected_rules = self._pre_run_phase(query)

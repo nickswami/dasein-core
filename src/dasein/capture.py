@@ -315,10 +315,7 @@ Apply the rule to fix the input. Return only the corrected input, nothing else."
                 "parent_run_id": None,
             }
             
-            # Add to global trace
-            _TRACE.append(step)
-            
-            # Also add to LLM wrapper's trace if available
+            # Add to LLM wrapper's trace if available
             if self.callback_handler and hasattr(self.callback_handler, '_llm') and self.callback_handler._llm:
                 if hasattr(self.callback_handler._llm, '_trace'):
                     self.callback_handler._llm._trace.append(step)
@@ -366,6 +363,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._current_chain_node = None  # Track current LangGraph node
         self._agent_was_recreated = False  # Track if agent was successfully recreated
         self._function_calls_made = {}  # Track function calls: {function_name: [{'step': N, 'ts': timestamp}]}
+        self._trace = []  # Instance-level trace storage (not global) for thread-safety
         self._verbose = verbose
         self._vprint(f"[DASEIN][CALLBACK] Initialized callback handler (LangGraph: {is_langgraph})")
         if coordinator_node:
@@ -382,7 +380,8 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         """Reset state that should be cleared between runs."""
         self._function_calls_made = {}
         self._injection_guard = set()
-        self._vprint(f"[DASEIN][CALLBACK] Reset run state (function calls and injection guard cleared)")
+        self._trace = []  # Clear instance trace
+        self._vprint(f"[DASEIN][CALLBACK] Reset run state (trace, function calls, and injection guard cleared)")
     
     def on_llm_start(
         self,
@@ -422,7 +421,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "parent_run_id": None,
             "node": self._current_chain_node,  # LangGraph node name (if available)
         }
-        _TRACE.append(step)
+        self._trace.append(step)
         # self._vprint(f"[DASEIN][CALLBACK] Captured llm_start: {len(_TRACE)} total steps")  # Commented out - too noisy
     
     def on_llm_end(
@@ -597,7 +596,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "tokens_output": output_tokens,
             "node": self._current_chain_node,  # LangGraph node name (if available)
         }
-        _TRACE.append(step)
+        self._trace.append(step)
     
     def on_agent_action(
         self,
@@ -618,7 +617,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "run_id": None,
             "parent_run_id": None,
         }
-        _TRACE.append(step)
+        self._trace.append(step)
     
     def on_agent_finish(
         self,
@@ -637,7 +636,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "run_id": None,
             "parent_run_id": None,
         }
-        _TRACE.append(step)
+        self._trace.append(step)
     
     def on_tool_start(
         self,
@@ -685,7 +684,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "parent_run_id": parent_run_id,
             "node": self._current_chain_node,  # LangGraph node name (if available)
         }
-        _TRACE.append(step)
+        self._trace.append(step)
     
     def on_tool_end(
         self,
@@ -719,7 +718,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "parent_run_id": parent_run_id,
             "node": self._current_chain_node,  # LangGraph node name (if available)
         }
-        _TRACE.append(step)
+        self._trace.append(step)
         
         # Clean up the stored tool name
         if run_id in self._tool_name_by_run_id:
@@ -746,7 +745,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "run_id": run_id,
             "parent_run_id": parent_run_id,
         }
-        _TRACE.append(step)
+        self._trace.append(step)
     
     def on_chain_start(
         self,
@@ -798,7 +797,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "run_id": None,
             "parent_run_id": None,
         }
-        _TRACE.append(step)
+        self._trace.append(step)
     
     def on_chain_end(
         self,
@@ -821,7 +820,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "run_id": None,
             "parent_run_id": None,
         }
-        _TRACE.append(step)
+        self._trace.append(step)
     
     def on_chain_error(
         self,
@@ -840,7 +839,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "run_id": None,
             "parent_run_id": None,
         }
-        _TRACE.append(step)
+        self._trace.append(step)
     
     def _extract_recent_message(self, inputs: Dict[str, Any]) -> str:
         """
@@ -916,8 +915,8 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             self._selected_rules = rules
     
     def get_trace(self) -> List[Dict[str, Any]]:
-        """Get the current trace."""
-        return _TRACE.copy()
+        """Get the current trace (instance-level, thread-safe)."""
+        return self._trace.copy()
     
     def _inject_first_turn_override(self, prompts: List[str]) -> List[str]:
         """Inject a generic first-turn override to own turn 1."""
@@ -1242,7 +1241,7 @@ Rules to Enforce:
             "run_id": kwargs.get("run_id"),
             "parent_run_id": kwargs.get("parent_run_id"),
         }
-        _TRACE.append(step)
+        self._trace.append(step)
     
     def _rule_covers_tool(self, rule, tool_name: str, tool_input: str) -> bool:
         """Check if a rule covers the given tool call."""
