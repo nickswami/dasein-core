@@ -1822,7 +1822,7 @@ Follow these rules when planning your actions."""
                     self._callback_handler.reset_run_state()
             
             # Capture metrics for this run (first run is baseline)
-            run_metrics = self._capture_run_metrics(*args, is_baseline=(i == 0), step_number=(i+1), **kwargs)
+            run_metrics = self._capture_run_metrics(*args, is_baseline=(i == 0), step_number=(i+1), total_steps=self._retry, **kwargs)
             results.append(run_metrics['result'])
             metrics.append(run_metrics)
             
@@ -1866,7 +1866,7 @@ Follow these rules when planning your actions."""
                     self._callback_handler.reset_run_state()
             
             # Capture metrics for this run (first run is baseline)
-            run_metrics = await self._acapture_run_metrics(*args, is_baseline=(i == 0), step_number=(i+1), **kwargs)
+            run_metrics = await self._acapture_run_metrics(*args, is_baseline=(i == 0), step_number=(i+1), total_steps=self._retry, **kwargs)
             results.append(run_metrics['result'])
             metrics.append(run_metrics)
             
