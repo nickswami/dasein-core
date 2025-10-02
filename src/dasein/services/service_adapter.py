@@ -94,7 +94,8 @@ class ServiceAdapter:
                         signals: Optional[Dict[str, Any]] = None, original_query: Optional[str] = None,
                         max_rules: Optional[int] = 5, performance_tracking_id: Optional[str] = None,
                         skip_synthesis: bool = False, agent_fingerprint: Optional[str] = None,
-                        step_id: Optional[str] = None, post_run_mode: str = "full") -> Dict[str, Any]:
+                        step_id: Optional[str] = None, post_run_mode: str = "full",
+                        wait_for_synthesis: bool = False) -> Dict[str, Any]:
         """
         Synthesize rules from run telemetry (replaces local rule synthesis)
         
@@ -110,6 +111,7 @@ class ServiceAdapter:
             skip_synthesis: Skip expensive rule synthesis, only return KPIs (deprecated, use post_run_mode)
             step_id: Step identifier for parallel execution tracking
             post_run_mode: "full" (KPIs + rule synthesis) or "kpi_only" (KPIs only, no rule synthesis)
+            wait_for_synthesis: Wait for synthesis to complete before returning (for benchmarking)
             
         Returns:
             Synthesis results including KPIs
@@ -135,6 +137,7 @@ class ServiceAdapter:
                 max_rules=max_rules,
                 performance_tracking_id=performance_tracking_id,
                 skip_synthesis=should_skip_synthesis,
+                wait_for_synthesis=wait_for_synthesis,
                 step_id=step_id
             )
             

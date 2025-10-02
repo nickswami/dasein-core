@@ -30,6 +30,7 @@ class RuleSynthesisRequest:
     max_rules: Optional[int] = 5
     performance_tracking_id: Optional[str] = None
     skip_synthesis: bool = False
+    wait_for_synthesis: bool = False
     step_id: Optional[str] = None
 
 
@@ -93,6 +94,7 @@ class PostRunClient:
             "max_rules": request.max_rules,
             "performance_tracking_id": request.performance_tracking_id,
             "skip_synthesis": request.skip_synthesis,
+            "wait_for_synthesis": request.wait_for_synthesis,
         }
         
         logger.info(f"Synthesizing rules for run: {request.run_id}")
