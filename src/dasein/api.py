@@ -1730,9 +1730,11 @@ Follow these rules when planning your actions."""
         # Extract trace data for display (but no KPI calculation)
         self._extract_trace_for_display(result, args[0] if args else None)
         
-        # NOW capture trace for display AFTER extraction
-        from .capture import _TRACE
-        self._last_run_trace = _TRACE.copy() if _TRACE else []
+        # NOW capture trace from callback handler AFTER extraction
+        if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'get_trace'):
+            self._last_run_trace = self._callback_handler.get_trace()
+        else:
+            self._last_run_trace = []
         self._vprint(f"[DASEIN][TRACE_CAPTURE] Captured {len(self._last_run_trace)} steps for display")
         
         # Trigger post-run phase asynchronously (fire-and-forget)
@@ -1799,9 +1801,11 @@ Follow these rules when planning your actions."""
         # Extract trace data for display (but no KPI calculation)
         self._extract_trace_for_display(result, args[0] if args else None)
         
-        # NOW capture trace for display AFTER extraction
-        from .capture import _TRACE
-        self._last_run_trace = _TRACE.copy() if _TRACE else []
+        # NOW capture trace from callback handler AFTER extraction
+        if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'get_trace'):
+            self._last_run_trace = self._callback_handler.get_trace()
+        else:
+            self._last_run_trace = []
         self._vprint(f"[DASEIN][TRACE_CAPTURE] Captured {len(self._last_run_trace)} steps for display")
         
         # Trigger post-run phase asynchronously (fire-and-forget)
@@ -2043,9 +2047,11 @@ Follow these rules when planning your actions."""
         # Extract trace data for display (but no KPI calculation)
         self._extract_trace_for_display(result, query)
         
-        # Capture trace for display only
-        from .capture import _TRACE
-        self._last_run_trace = _TRACE.copy() if _TRACE else []
+        # Capture trace from callback handler for display only
+        if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'get_trace'):
+            self._last_run_trace = self._callback_handler.get_trace()
+        else:
+            self._last_run_trace = []
         self._vprint(f"[DASEIN][TRACE_CAPTURE] Captured {len(self._last_run_trace)} steps for display")
         
         # Post-run phase: Rule synthesis and learning
@@ -2099,11 +2105,8 @@ Follow these rules when planning your actions."""
                 if trace:
                     print(f"[DEBUG] Extracted {len(trace)} steps from LangGraph result for display")
         
-        # Store trace in global _TRACE for print_trace() to access
-        if trace:
-            from .capture import _TRACE
-            _TRACE.clear()
-            _TRACE.extend(trace)
+        # Note: Trace is already captured from callback handler in _invoke_single/_ainvoke_single
+        # No need to store in global _TRACE (removed for thread-safety)
     
     def _extract_metrics_from_trace(self, result=None, query=None):
         """DEPRECATED: Extract trace data only. KPI calculation now handled by post-run API service."""
@@ -2135,11 +2138,8 @@ Follow these rules when planning your actions."""
                 extracted_query = self._extract_query_from_input(query) if query else ""
                 trace = self._extract_trace_from_langgraph_result(result, extracted_query)
         
-        # Store the extracted trace in the global trace for print_trace() to access
-        if trace:
-            from .capture import _TRACE
-            _TRACE.clear()
-            _TRACE.extend(trace)
+        # Note: Trace is already captured from callback handler in _invoke_single/_ainvoke_single
+        # No need to store in global _TRACE (removed for thread-safety)
         
         if not trace:
             print(f"[DEBUG] No trace available for KPI extraction")
