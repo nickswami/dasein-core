@@ -267,8 +267,6 @@ A: These are safe to ignore in Colab. The package will work correctly despite ve
 
 ## Support
 
-- 📧 Email: support@dasein.ai
-- 💬 Discord: [Join our community](https://discord.gg/dasein)
 - 🐛 Issues: [GitHub Issues](https://github.com/nickswami/dasein-core/issues)
 
 ## Citation
