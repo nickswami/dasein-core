@@ -29,14 +29,21 @@ pip install -e .
 
 ## 📓 Try It Now in Colab
 
-**Zero setup required!** Try all three examples in your browser:
+<div align="center">
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/nickswami/dasein-core/blob/main/examples/dasein_examples.ipynb)
+**🚀 Zero setup required! Try all three examples in your browser:**
 
-The interactive notebook includes:
-- 🗄️ **SQL Agent** - Learn query patterns (30-50% token reduction)
-- 🌐 **Browser Agent** - Optimize web navigation
-- 🔍 **Deep Research** - Multi-agent workflows (20-40% savings)
+<a href="https://colab.research.google.com/github/nickswami/dasein-core/blob/main/examples/dasein_examples.ipynb" target="_blank">
+  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" style="height: 60px;"/>
+</a>
+
+**Three complete examples with automatic learning:**
+
+🗄️ **SQL Agent** • 🌐 **Browser Agent** • 🔍 **Deep Research**
+
+*30-50% token reduction • Optimized navigation • 20-40% multi-agent savings*
+
+</div>
 
 ---
 
