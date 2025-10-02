@@ -48,7 +48,7 @@ from .trace_buffer import TraceBuffer
 # Distributed services
 from .services import ServiceConfig, PreRunClient, PostRunClient, ServiceAdapter
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     # Core API
     "cognate",

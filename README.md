@@ -251,6 +251,20 @@ We welcome contributions! Please see `CONTRIBUTING.md` for guidelines.
 
 MIT License - see `LICENSE` file for details.
 
+## Troubleshooting
+
+### Common Issues in Colab/Jupyter
+
+**Q: I see timeout warnings for `dasein-pre-run` and `dasein-post-run` services**
+
+A: These warnings can appear on first connection while the cloud services wake up (cold start). The services are **fully public** and will work after a brief initialization period. Your agent will continue running and learning will activate automatically once the services respond.
+
+**Q: I see dependency conflict warnings**
+
+A: These are safe to ignore in Colab. The package will work correctly despite version mismatches with Colab's pre-installed packages.
+
+---
+
 ## Support
 
 - 📧 Email: support@dasein.ai
