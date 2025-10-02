@@ -393,7 +393,7 @@ def _get_event_store() -> EventStore:
 
 
 
-def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False):
+def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None):
     """
     Wrap an agent with Dasein's memory capabilities.
     
@@ -410,12 +410,15 @@ def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking
         performance_tracking: If True, enable detailed performance metrics and improvement analysis.
                              If "sequential", enable sequential learning mode for POC demonstrations.
         rule_trace: If True, print raw step LLM calls to help debug rule generation
+        post_run: Controls post-run behavior. Options: "full" (KPIs + rule synthesis), "kpi_only" (KPIs only, skip rule synthesis)
+        performance_tracking_id: Optional custom performance tracking ID for grouping related runs. 
+                                If None, auto-generates a unique ID. Use same ID to share learnings across queries.
         
     Returns:
         A proxy object with .run() and .invoke() methods
     """
     global _global_cognate_proxy
-    _global_cognate_proxy = CognateProxy(agent, weights=weights, verbose=verbose, retry=retry, performance_tracking=performance_tracking, rule_trace=rule_trace)
+    _global_cognate_proxy = CognateProxy(agent, weights=weights, verbose=verbose, retry=retry, performance_tracking=performance_tracking, rule_trace=rule_trace, post_run=post_run, performance_tracking_id=performance_tracking_id)
     return _global_cognate_proxy
 
 
@@ -679,13 +682,14 @@ class CognateProxy:
     Proxy that wraps a LangChain agent and implements the complete Dasein pipeline.
     """
     
-    def __init__(self, agent, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False):
+    def __init__(self, agent, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None):
         self._agent = agent
         self._weights = weights or W_COST
         self._verbose = verbose
         self._retry = retry
         self._performance_tracking = performance_tracking
         self._rule_trace = rule_trace
+        self._post_run = post_run  # "full" or "kpi_only"
         # Ensure naive flag exists (legacy code path)
         self._naive = False
         #  CRITICAL: LangGraph Detection & Parameter Extraction
@@ -721,11 +725,17 @@ class CognateProxy:
         self._sequential_step = 0
         self._sequential_metrics = []
         
-        # Performance tracking isolation
+        # Performance tracking isolation - use provided ID or auto-generate
         if self._performance_tracking or self._sequential_mode:
-            import uuid
-            self._performance_tracking_id = str(uuid.uuid4())
-            print(f"[DASEIN] Performance tracking session: {self._performance_tracking_id}")
+            if performance_tracking_id:
+                # Use provided tracking ID (for grouping related runs)
+                self._performance_tracking_id = performance_tracking_id
+                print(f"[DASEIN] Performance tracking session (custom ID): {self._performance_tracking_id}")
+            else:
+                # Auto-generate unique ID
+                import uuid
+                self._performance_tracking_id = str(uuid.uuid4())
+                print(f"[DASEIN] Performance tracking session (auto-generated): {self._performance_tracking_id}")
         else:
             self._performance_tracking_id = None
         
@@ -754,19 +764,30 @@ class CognateProxy:
             if isinstance(input_data, str):
                 return input_data
             
-            # Handle LangGraph message format: {"messages": [("user", "query")]}
-            if isinstance(input_data, dict) and "messages" in input_data:
-                messages = input_data["messages"]
-                if messages and len(messages) > 0:
-                    # Get the last human message
-                    for message in reversed(messages):
-                        if isinstance(message, tuple) and len(message) == 2:
-                            role, content = message
-                            if role in ["user", "human"]:
-                                return str(content)
-                        elif hasattr(message, 'content') and hasattr(message, 'type'):
-                            if message.type in ["human", "user"]:
-                                return str(message.content)
+            # Handle dict input
+            if isinstance(input_data, dict):
+                # LangChain SQL agent format: {"input": "query"}
+                if "input" in input_data:
+                    return str(input_data["input"])
+                # Alternative keys
+                if "question" in input_data:
+                    return str(input_data["question"])
+                if "query" in input_data:
+                    return str(input_data["query"])
+                
+                # Handle LangGraph message format: {"messages": [("user", "query")]}
+                if "messages" in input_data:
+                    messages = input_data["messages"]
+                    if messages and len(messages) > 0:
+                        # Get the last human message
+                        for message in reversed(messages):
+                            if isinstance(message, tuple) and len(message) == 2:
+                                role, content = message
+                                if role in ["user", "human"]:
+                                    return str(content)
+                            elif hasattr(message, 'content') and hasattr(message, 'type'):
+                                if message.type in ["human", "user"]:
+                                    return str(message.content)
             
             # Handle list input
             if isinstance(input_data, list) and input_data:
@@ -1637,7 +1658,8 @@ Follow these rules when planning your actions."""
     
     def _invoke_single(self, *args, **kwargs):
         """Single invocation with Dasein pipeline."""
-        query = args[0] if args else ""
+        # Extract the actual query string from agent input using unified method
+        query = self._extract_query_from_input(args[0]) if args else ""
         
         if self._naive:
             # Naive mode: Skip rule gathering and synthesis, just run the agent
@@ -2708,7 +2730,11 @@ Follow these rules when planning your actions."""
             cleaned_trace = clean_for_json(trace)
             
             # 3) Call post-run service for synthesis
-            print(f"[DASEIN] Calling post-run service for rule synthesis")
+            if self._post_run == "kpi_only":
+                print(f"[DASEIN] Calling post-run service (KPI-only mode, no rule synthesis)")
+            else:
+                print(f"[DASEIN] Calling post-run service for rule synthesis")
+            
             response = self._service_adapter.synthesize_rules(
                 run_id=None,  # Will use stored run_id from pre-run phase
                 trace=cleaned_trace,
@@ -2720,7 +2746,8 @@ Follow these rules when planning your actions."""
                 performance_tracking_id=self._performance_tracking_id,  # For rule isolation
                 skip_synthesis=skip_synthesis,  # Skip expensive synthesis when not needed
                 agent_fingerprint=getattr(self._agent, 'agent_id', None) or f"agent_{id(self._agent)}",
-                step_id=self._current_step_id  # Pass step_id for parallel execution tracking
+                step_id=self._current_step_id,  # Pass step_id for parallel execution tracking
+                post_run_mode=self._post_run  # Pass post_run mode ("full" or "kpi_only")
             )
 
             # response is a dict from ServiceAdapter; handle accordingly

@@ -94,7 +94,7 @@ class ServiceAdapter:
                         signals: Optional[Dict[str, Any]] = None, original_query: Optional[str] = None,
                         max_rules: Optional[int] = 5, performance_tracking_id: Optional[str] = None,
                         skip_synthesis: bool = False, agent_fingerprint: Optional[str] = None,
-                        step_id: Optional[str] = None) -> Dict[str, Any]:
+                        step_id: Optional[str] = None, post_run_mode: str = "full") -> Dict[str, Any]:
         """
         Synthesize rules from run telemetry (replaces local rule synthesis)
         
@@ -107,8 +107,9 @@ class ServiceAdapter:
             original_query: Original user query for final success determination
             max_rules: Maximum number of rules to synthesize
             performance_tracking_id: Performance tracking session ID for rule isolation
-            skip_synthesis: Skip expensive rule synthesis, only return KPIs
+            skip_synthesis: Skip expensive rule synthesis, only return KPIs (deprecated, use post_run_mode)
             step_id: Step identifier for parallel execution tracking
+            post_run_mode: "full" (KPIs + rule synthesis) or "kpi_only" (KPIs only, no rule synthesis)
             
         Returns:
             Synthesis results including KPIs
@@ -118,6 +119,10 @@ class ServiceAdapter:
             actual_run_id = run_id or self._last_run_id
             if not actual_run_id:
                 raise ValueError("No run_id available for synthesis")
+            
+            # Convert post_run_mode to skip_synthesis for backward compatibility
+            # "kpi_only" mode skips rule synthesis
+            should_skip_synthesis = (post_run_mode == "kpi_only") or skip_synthesis
             
             request = RuleSynthesisRequest(
                 run_id=actual_run_id,
@@ -129,7 +134,7 @@ class ServiceAdapter:
                 agent_fingerprint=agent_fingerprint,
                 max_rules=max_rules,
                 performance_tracking_id=performance_tracking_id,
-                skip_synthesis=skip_synthesis,
+                skip_synthesis=should_skip_synthesis,
                 step_id=step_id
             )
             
