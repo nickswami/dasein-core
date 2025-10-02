@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 from .capture import DaseinCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
+from langchain_core.exceptions import OutputParserException
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime
 from .events import EventStore
@@ -502,6 +503,10 @@ class DaseinToolWrapper:
             
             return result
             
+        except OutputParserException:
+            # Pass through parsing errors so agent's handle_parsing_errors can work
+            self._vprint(f"[DASEIN][TOOL_WRAPPER] OutputParserException detected - passing through to agent")
+            raise
         except Exception as e:
             self._vprint(f"[DASEIN][TOOL_WRAPPER] Exception in _run: {e}")
             import traceback
@@ -538,6 +543,10 @@ class DaseinToolWrapper:
             
             return result
             
+        except OutputParserException:
+            # Pass through parsing errors so agent's handle_parsing_errors can work
+            self._vprint(f"[DASEIN][TOOL_WRAPPER] OutputParserException detected - passing through to agent")
+            raise
         except Exception as e:
             self._vprint(f"[DASEIN][TOOL_WRAPPER] Exception in invoke: {e}")
             import traceback
@@ -553,42 +562,54 @@ class DaseinToolWrapper:
         """Intercept direct call and apply tool_start rules."""
         self._vprint(f"[DASEIN][TOOL_WRAPPER] _run called for {self.name}")
         
-        # Apply tool_start rules if we have selected rules
-        if hasattr(self.callback_handler, '_selected_rules') and self.callback_handler._selected_rules:
-            self._vprint(f"[DASEIN][TOOL_WRAPPER] Applying tool_start rules...")
-            modified_args = self._apply_tool_rules(args, kwargs)
-            args, kwargs = modified_args
-        
-        # Call the original tool
-        if hasattr(self.original_tool, '__call__'):
-            result = self.original_tool(*args, **kwargs)
-        elif hasattr(self.original_tool, 'invoke'):
-            result = self.original_tool.invoke(*args, **kwargs)
-        else:
-            result = self.original_tool._run(*args, **kwargs)
-        
-        # Capture the tool output in the trace
-        self._capture_tool_output(self.name, args, kwargs, result)
-        
-        return result
+        try:
+            # Apply tool_start rules if we have selected rules
+            if hasattr(self.callback_handler, '_selected_rules') and self.callback_handler._selected_rules:
+                self._vprint(f"[DASEIN][TOOL_WRAPPER] Applying tool_start rules...")
+                modified_args = self._apply_tool_rules(args, kwargs)
+                args, kwargs = modified_args
+            
+            # Call the original tool
+            if hasattr(self.original_tool, '__call__'):
+                result = self.original_tool(*args, **kwargs)
+            elif hasattr(self.original_tool, 'invoke'):
+                result = self.original_tool.invoke(*args, **kwargs)
+            else:
+                result = self.original_tool._run(*args, **kwargs)
+            
+            # Capture the tool output in the trace
+            self._capture_tool_output(self.name, args, kwargs, result)
+            
+            return result
+            
+        except OutputParserException:
+            # Pass through parsing errors so agent's handle_parsing_errors can work
+            self._vprint(f"[DASEIN][TOOL_WRAPPER] OutputParserException detected - passing through to agent")
+            raise
     
     async def _arun(self, *args, **kwargs) -> str:
         """Async version."""
         self._vprint(f"[DASEIN][TOOL_WRAPPER] _run called for {self.name}")
         
-        # Apply tool_start rules if we have selected rules
-        if hasattr(self.callback_handler, '_selected_rules') and self.callback_handler._selected_rules:
-            self._vprint(f"[DASEIN][TOOL_WRAPPER] Applying tool_start rules...")
-            modified_args = self._apply_tool_rules(args, kwargs)
-            args, kwargs = modified_args
-        
-        # Call the original tool
-        result = await self.original_tool._arun(*args, **kwargs)
-        
-        # Capture the tool output in the trace
-        self._capture_tool_output(self.name, args, kwargs, result)
-        
-        return result
+        try:
+            # Apply tool_start rules if we have selected rules
+            if hasattr(self.callback_handler, '_selected_rules') and self.callback_handler._selected_rules:
+                self._vprint(f"[DASEIN][TOOL_WRAPPER] Applying tool_start rules...")
+                modified_args = self._apply_tool_rules(args, kwargs)
+                args, kwargs = modified_args
+            
+            # Call the original tool
+            result = await self.original_tool._arun(*args, **kwargs)
+            
+            # Capture the tool output in the trace
+            self._capture_tool_output(self.name, args, kwargs, result)
+            
+            return result
+            
+        except OutputParserException:
+            # Pass through parsing errors so agent's handle_parsing_errors can work
+            self._vprint(f"[DASEIN][TOOL_WRAPPER] OutputParserException detected - passing through to agent")
+            raise
     
     def _apply_tool_rules(self, args, kwargs):
         """Apply tool_start rules to modify tool input."""
