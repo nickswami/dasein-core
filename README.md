@@ -16,7 +16,7 @@ Dasein learns from your agent's execution history and automatically injects lear
 ## Installation
 
 ```bash
-pip install dasein
+pip install dasein-core
 ```
 
 Or install from source:
