@@ -27,8 +27,9 @@ def _vprint(message: str, verbose: bool = False, force: bool = False):
         print(message)
 
 
-# In-memory trace store
-_TRACE: List[Dict[str, Any]] = []
+# DEPRECATED: Global trace store removed for thread-safety
+# Traces are now stored instance-level in DaseinCallbackHandler._trace
+# _TRACE: List[Dict[str, Any]] = []
 
 # Hook cache for agent fingerprinting
 _HOOK_CACHE: Dict[str, Any] = {}
@@ -333,10 +334,8 @@ Apply the rule to fix the input. Return only the corrected input, nothing else."
             self._vprint(f"[DASEIN][TOOL_WRAPPER] Captured tool output for {tool_name}")
             self._vprint(f"[DASEIN][TOOL_WRAPPER] Output length: {len(result_str)} chars")
             self._vprint(f"[DASEIN][TOOL_WRAPPER] First 200 chars: {result_str[:200]}")
-            self._vprint(f"[DASEIN][TOOL_WRAPPER] Global trace length after capture: {len(_TRACE)}")
-            if self.callback_handler and hasattr(self.callback_handler, '_llm') and self.callback_handler._llm:
-                if hasattr(self.callback_handler._llm, '_trace'):
-                    self._vprint(f"[DASEIN][TOOL_WRAPPER] LLM wrapper trace length: {len(self.callback_handler._llm._trace)}")
+            if self.callback_handler and hasattr(self.callback_handler, '_trace'):
+                self._vprint(f"[DASEIN][TOOL_WRAPPER] Callback handler trace length after capture: {len(self.callback_handler._trace)}")
             
         except Exception as e:
             self._vprint(f"[DASEIN][TOOL_WRAPPER] Error capturing tool output: {e}")
@@ -498,7 +497,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                     func_call = generation.message.additional_kwargs.get('function_call')
                     if func_call and isinstance(func_call, dict) and 'name' in func_call:
                         func_name = func_call['name']
-                        step_num = len(_TRACE)
+                        step_num = len(self._trace)
                         
                         # Extract arguments and create preview
                         args_str = func_call.get('arguments', '')
@@ -1363,12 +1362,24 @@ Output only the corrected tool input:"""
 
 def get_trace() -> List[Dict[str, Any]]:
     """
-    Get the current trace.
+    DEPRECATED: Legacy function for backward compatibility.
+    Get the current trace from active CognateProxy instances.
     
     Returns:
-        List of trace step dictionaries
+        List of trace step dictionaries (empty if no active traces)
     """
-    return _TRACE.copy()
+    # Try to get trace from active CognateProxy instances
+    try:
+        import gc
+        for obj in gc.get_objects():
+            if hasattr(obj, '_last_run_trace') and obj._last_run_trace:
+                return obj._last_run_trace.copy()
+            if hasattr(obj, '_callback_handler') and hasattr(obj._callback_handler, '_trace'):
+                return obj._callback_handler._trace.copy()
+    except Exception:
+        pass
+    
+    return []  # Return empty list if no trace found
 
 
 def get_modified_tool_input(tool_name: str, original_input: str) -> str:
@@ -1394,16 +1405,15 @@ def clear_modified_tool_inputs():
 
 def clear_trace() -> None:
     """
-    Clear the current trace.
+    DEPRECATED: Legacy function for backward compatibility.
+    Clear traces in active CognateProxy instances.
     """
-    global _TRACE
-    _TRACE.clear()
-    
-    # Also clear the wrapper's trace if it exists
+    # Try to clear traces in active CognateProxy instances
     try:
-        from .api import _global_cognate_proxy
-        if _global_cognate_proxy and hasattr(_global_cognate_proxy, '_wrapped_llm') and _global_cognate_proxy._wrapped_llm:
-            _global_cognate_proxy._wrapped_llm.clear_trace()
+        import gc
+        for obj in gc.get_objects():
+            if hasattr(obj, '_callback_handler') and hasattr(obj._callback_handler, 'reset_run_state'):
+                obj._callback_handler.reset_run_state()
     except Exception:
         pass  # Ignore if not available
 
@@ -1419,7 +1429,7 @@ def print_trace(max_chars: int = 240, only: tuple[str, ...] | None = None, suppr
         show_tree: If True, left-pad args_excerpt by 2*depth spaces for tree-like view
         show_summary: If True, show step_type counts and deduped rows summary
     """
-    # Try to get trace from LLM wrapper first, then fallback to global _TRACE
+    # Try to get trace from active CognateProxy instances
     trace = None
     try:
         # Import here to avoid circular imports
@@ -1430,7 +1440,7 @@ def print_trace(max_chars: int = 240, only: tuple[str, ...] | None = None, suppr
         pass
     
     if not trace:
-        trace = _TRACE
+        trace = get_trace()  # Use the updated get_trace() function
     
     # If global trace is empty, try to get it from the last completed run
     if not trace:
