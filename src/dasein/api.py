@@ -2783,7 +2783,7 @@ Follow these rules when planning your actions."""
                 max_rules=self._top_k,  # Configurable via top_k parameter
                 performance_tracking_id=self._performance_tracking_id,  # For rule isolation
                 skip_synthesis=skip_synthesis,  # Skip expensive synthesis when not needed
-                agent_fingerprint=getattr(self._agent, 'agent_id', None) or f"agent_{id(self._agent)}",
+                agent_fingerprint=agent_fingerprint,  # Reuse fingerprint from pre-run (line 2613)
                 step_id=self._current_step_id,  # Pass step_id for parallel execution tracking
                 post_run_mode=self._post_run,  # Pass post_run mode ("full" or "kpi_only")
                 wait_for_synthesis=wait_for_synthesis  # Wait for synthesis on retry runs (except last)
