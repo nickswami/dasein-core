@@ -770,6 +770,11 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         except:
             tool_output_items = 0
         
+        # Extract available selectors from DOM-like output (web browse agents)
+        available_selectors = None
+        if tool_name in ['extract_text', 'get_elements', 'extract_hyperlinks', 'extract_content']:
+            available_selectors = self._extract_semantic_selectors(output_str)
+        
         step = {
             "step_type": "tool_end",
             "tool_name": tool_name,
@@ -784,6 +789,10 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "tool_output_chars": tool_output_chars,
             "tool_output_items": tool_output_items,
         }
+        
+        # Add available_selectors only if found (keep trace light)
+        if available_selectors:
+            step["available_selectors"] = available_selectors
         self._trace.append(step)
         
         # Clean up the stored tool name
@@ -967,6 +976,63 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         else:
             # Take first X chars - better for tool inputs
             return text[:max_len-3] + "..."
+    
+    def _extract_semantic_selectors(self, html_text: str) -> List[Dict[str, int]]:
+        """
+        Extract semantic HTML tags from output for grounding web browse rules.
+        Only extracts semantic tags (nav, header, h1, etc.) to keep trace lightweight.
+        
+        Args:
+            html_text: Output text that may contain HTML
+            
+        Returns:
+            List of {"tag": str, "count": int} sorted by count descending, or None if no HTML
+        """
+        import re
+        
+        # Quick check: does this look like HTML?
+        if '<' not in html_text or '>' not in html_text:
+            return None
+        
+        # Semantic tags we care about (prioritized for web browse agents)
+        semantic_tags = [
+            # Navigation/Structure (highest priority)
+            'nav', 'header', 'footer', 'main', 'article', 'section', 'aside',
+            
+            # Headers (critical for "find headers" queries!)
+            'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            
+            # Interactive
+            'a', 'button', 'form', 'input', 'textarea', 'select', 'label',
+            
+            # Lists (often used for navigation)
+            'ul', 'ol', 'li',
+            
+            # Tables (data extraction)
+            'table', 'thead', 'tbody', 'tr', 'th', 'td',
+            
+            # Media
+            'img', 'video', 'audio'
+        ]
+        
+        # Count occurrences of each semantic tag
+        found_tags = {}
+        for tag in semantic_tags:
+            # Pattern: <tag ...> or <tag> (opening tags only)
+            pattern = f'<{tag}[\\s>]'
+            matches = re.findall(pattern, html_text, re.IGNORECASE)
+            if matches:
+                found_tags[tag] = len(matches)
+        
+        # Return None if no semantic tags found
+        if not found_tags:
+            return None
+        
+        # Convert to list format, sorted by count descending
+        # Limit to top 15 to keep trace light
+        result = [{"tag": tag, "count": count} 
+                  for tag, count in sorted(found_tags.items(), key=lambda x: -x[1])]
+        return result[:15]  # Top 15 most common tags
     
     def set_selected_rules(self, rules: List[Dict[str, Any]]):
         """Set the rules selected for this run.
