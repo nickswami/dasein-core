@@ -405,10 +405,11 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         
         # 🚨 OPTIMIZED: For LangGraph, check if kwargs contains 'invocation_params' with messages
         # Extract the most recent message instead of full history
+        # Use from_end=True to capture the END of system prompts (where user's actual query is)
         if 'invocation_params' in kwargs and 'messages' in kwargs['invocation_params']:
             args_excerpt = self._extract_recent_message({'messages': kwargs['invocation_params']['messages']})
         else:
-            args_excerpt = self._excerpt(" | ".join(modified_prompts))
+            args_excerpt = self._excerpt(" | ".join(modified_prompts), from_end=True)
         
         step = {
             "step_type": "llm_start",
@@ -880,12 +881,26 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             # On any error, fall back to original behavior
             return self._excerpt(str(inputs))
     
-    def _excerpt(self, obj: Any, max_len: int = 250) -> str:
-        """Truncate text to max_length with ellipsis."""
+    def _excerpt(self, obj: Any, max_len: int = 250, from_end: bool = False) -> str:
+        """
+        Truncate text to max_length with ellipsis.
+        
+        Args:
+            obj: Object to convert to string and truncate
+            max_len: Maximum length of excerpt
+            from_end: If True, take LAST max_len chars (better for system prompts).
+                     If False, take FIRST max_len chars (better for tool args).
+        """
         text = str(obj)
         if len(text) <= max_len:
             return text
-        return text[:max_len-3] + "..."
+        
+        if from_end:
+            # Take last X chars - better for system prompts where the end contains user's actual query
+            return "..." + text[-(max_len-3):]
+        else:
+            # Take first X chars - better for tool inputs
+            return text[:max_len-3] + "..."
     
     def set_selected_rules(self, rules: List[Dict[str, Any]]):
         """Set the rules selected for this run.
