@@ -1108,9 +1108,14 @@ Rules to Enforce:
                 
                 # Log the complete injection for debugging
                 # Compact injection summary
-                func_count = len(self._function_calls_made) if hasattr(self, '_function_calls_made') and state_context else 0
-                node_name = getattr(self, '_current_chain_node', 'unknown')
-                print(f"[DASEIN] 🎯 Injecting {len(system_rules)} rule(s) into {node_name} | State: {func_count} functions tracked")
+                if hasattr(self, '_is_langgraph') and self._is_langgraph:
+                    # LangGraph: show node name
+                    func_count = len(self._function_calls_made) if hasattr(self, '_function_calls_made') and state_context else 0
+                    node_name = getattr(self, '_current_chain_node', 'unknown')
+                    print(f"[DASEIN] 🎯 Injecting {len(system_rules)} rule(s) into {node_name} | State: {func_count} functions tracked")
+                else:
+                    # LangChain: simpler logging without node name
+                    print(f"[DASEIN] 🎯 Injecting {len(system_rules)} rule(s) into agent")
                 
                 return modified_prompts
             

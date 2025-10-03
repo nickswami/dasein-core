@@ -394,7 +394,7 @@ def _get_event_store() -> EventStore:
 
 
 
-def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None):
+def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None, top_k=5):
     """
     Wrap an agent with Dasein's memory capabilities.
     
@@ -414,12 +414,13 @@ def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking
         post_run: Controls post-run behavior. Options: "full" (KPIs + rule synthesis), "kpi_only" (KPIs only, skip rule synthesis)
         performance_tracking_id: Optional custom performance tracking ID for grouping related runs. 
                                 If None, auto-generates a unique ID. Use same ID to share learnings across queries.
+        top_k: Maximum number of rules to select per layer (default: 5)
         
     Returns:
         A proxy object with .run() and .invoke() methods
     """
     global _global_cognate_proxy
-    _global_cognate_proxy = CognateProxy(agent, weights=weights, verbose=verbose, retry=retry, performance_tracking=performance_tracking, rule_trace=rule_trace, post_run=post_run, performance_tracking_id=performance_tracking_id)
+    _global_cognate_proxy = CognateProxy(agent, weights=weights, verbose=verbose, retry=retry, performance_tracking=performance_tracking, rule_trace=rule_trace, post_run=post_run, performance_tracking_id=performance_tracking_id, top_k=top_k)
     return _global_cognate_proxy
 
 
