@@ -411,6 +411,21 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         else:
             args_excerpt = self._excerpt(" | ".join(modified_prompts), from_end=True)
         
+        # GNN-related fields
+        step_index = len(self._trace)
+        
+        # Track which rules triggered at this step (llm_start rules)
+        rule_triggered_here = []
+        if hasattr(self, '_selected_rules') and self._selected_rules:
+            for rule_meta in self._selected_rules:
+                if isinstance(rule_meta, tuple) and len(rule_meta) == 2:
+                    rule_obj, _metadata = rule_meta
+                else:
+                    rule_obj = rule_meta
+                target_step_type = getattr(rule_obj, 'target_step_type', '')
+                if target_step_type in ['llm_start', 'chain_start']:
+                    rule_triggered_here.append(getattr(rule_obj, 'id', 'unknown'))
+        
         step = {
             "step_type": "llm_start",
             "tool_name": model_name,
@@ -420,6 +435,9 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "run_id": None,
             "parent_run_id": None,
             "node": self._current_chain_node,  # LangGraph node name (if available)
+            # GNN step-level fields
+            "step_index": step_index,
+            "rule_triggered_here": rule_triggered_here,
         }
         self._trace.append(step)
         # self._vprint(f"[DASEIN][CALLBACK] Captured llm_start: {len(_TRACE)} total steps")  # Commented out - too noisy
@@ -584,6 +602,15 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             import traceback
             traceback.print_exc()
         
+        # GNN-related fields: compute tokens_delta
+        step_index = len(self._trace)
+        tokens_delta = 0
+        # Find previous step with tokens_output to compute delta
+        for prev_step in reversed(self._trace):
+            if 'tokens_output' in prev_step and prev_step['tokens_output'] > 0:
+                tokens_delta = output_tokens - prev_step['tokens_output']
+                break
+        
         step = {
             "step_type": "llm_end",
             "tool_name": "",
@@ -595,6 +622,9 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "tokens_input": input_tokens,
             "tokens_output": output_tokens,
             "node": self._current_chain_node,  # LangGraph node name (if available)
+            # GNN step-level fields
+            "step_index": step_index,
+            "tokens_delta": tokens_delta,
         }
         self._trace.append(step)
     
@@ -674,6 +704,21 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         
         args_excerpt = self._excerpt(modified_input)
         
+        # GNN-related fields: capture step-level metrics
+        step_index = len(self._trace)
+        tool_input_chars = len(str(input_str))
+        
+        # Track which rules triggered at this step
+        rule_triggered_here = []
+        if hasattr(self, '_selected_rules') and self._selected_rules:
+            for rule_meta in self._selected_rules:
+                if isinstance(rule_meta, tuple) and len(rule_meta) == 2:
+                    rule_obj, _metadata = rule_meta
+                else:
+                    rule_obj = rule_meta
+                if getattr(rule_obj, 'target_step_type', '') == "tool_start":
+                    rule_triggered_here.append(getattr(rule_obj, 'id', 'unknown'))
+        
         step = {
             "step_type": "tool_start",
             "tool_name": tool_name,
@@ -683,6 +728,10 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "run_id": run_id,
             "parent_run_id": parent_run_id,
             "node": self._current_chain_node,  # LangGraph node name (if available)
+            # GNN step-level fields
+            "step_index": step_index,
+            "tool_input_chars": tool_input_chars,
+            "rule_triggered_here": rule_triggered_here,
         }
         self._trace.append(step)
     
@@ -708,6 +757,19 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         # self._vprint(f"[DASEIN][CALLBACK] Output length: {len(output_str)} chars")  # Commented out - too noisy
         # self._vprint(f"[DASEIN][CALLBACK] Outcome length: {len(outcome)} chars")  # Commented out - too noisy
         
+        # GNN-related fields: capture tool output metrics
+        step_index = len(self._trace)
+        tool_output_chars = len(output_str)
+        
+        # Estimate tool_output_items (heuristic: count lines, or rows if SQL-like)
+        tool_output_items = 0
+        try:
+            # Try to count lines as a proxy for items
+            if output_str:
+                tool_output_items = output_str.count('\n') + 1
+        except:
+            tool_output_items = 0
+        
         step = {
             "step_type": "tool_end",
             "tool_name": tool_name,
@@ -717,6 +779,10 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "run_id": run_id,
             "parent_run_id": parent_run_id,
             "node": self._current_chain_node,  # LangGraph node name (if available)
+            # GNN step-level fields
+            "step_index": step_index,
+            "tool_output_chars": tool_output_chars,
+            "tool_output_items": tool_output_items,
         }
         self._trace.append(step)
         
