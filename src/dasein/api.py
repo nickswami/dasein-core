@@ -703,7 +703,7 @@ class CognateProxy:
     Proxy that wraps a LangChain agent and implements the complete Dasein pipeline.
     """
     
-    def __init__(self, agent, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None):
+    def __init__(self, agent, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None, top_k=5):
         self._agent = agent
         self._weights = weights or W_COST
         self._verbose = verbose
@@ -711,6 +711,7 @@ class CognateProxy:
         self._performance_tracking = performance_tracking
         self._rule_trace = rule_trace
         self._post_run = post_run  # "full" or "kpi_only"
+        self._top_k = top_k  # Maximum number of rules to select per layer
         # Ensure naive flag exists (legacy code path)
         self._naive = False
         #  CRITICAL: LangGraph Detection & Parameter Extraction
@@ -2614,7 +2615,7 @@ Follow these rules when planning your actions."""
             selected_rules = self._service_adapter.select_rules(
                 query=query,
                 agent_fingerprint=agent_fingerprint,
-                max_rules_per_layer=5,  # Default to 5 rules per layer
+                max_rules_per_layer=self._top_k,  # Configurable via top_k parameter
                 performance_tracking_id=self._performance_tracking_id,  # For rule isolation
                 is_baseline=is_baseline  # Skip rule selection for baselines
             )
@@ -2771,7 +2772,7 @@ Follow these rules when planning your actions."""
                 artifacts=artifacts,
                 signals=signals,
                 original_query=query,  # Pass original query for final success determination
-                max_rules=5,  # Default to 5 rules
+                max_rules=self._top_k,  # Configurable via top_k parameter
                 performance_tracking_id=self._performance_tracking_id,  # For rule isolation
                 skip_synthesis=skip_synthesis,  # Skip expensive synthesis when not needed
                 agent_fingerprint=getattr(self._agent, 'agent_id', None) or f"agent_{id(self._agent)}",
