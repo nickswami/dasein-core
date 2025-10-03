@@ -2761,10 +2761,17 @@ Follow these rules when planning your actions."""
             cleaned_trace = clean_for_json(trace)
             
             # 3) Call post-run service for synthesis
+            # For retry > 1, wait for synthesis on all runs except the last one
+            wait_for_synthesis = False
+            if total_steps and step_number and step_number < total_steps:
+                wait_for_synthesis = True
+                print(f"[DASEIN] Will WAIT for rule synthesis (step {step_number}/{total_steps})")
+            
             if self._post_run == "kpi_only":
                 print(f"[DASEIN] Calling post-run service (KPI-only mode, no rule synthesis)")
             else:
-                print(f"[DASEIN] Calling post-run service for rule synthesis")
+                mode_str = "BLOCKING" if wait_for_synthesis else "ASYNC"
+                print(f"[DASEIN] Calling post-run service for rule synthesis ({mode_str} mode)")
             
             response = self._service_adapter.synthesize_rules(
                 run_id=None,  # Will use stored run_id from pre-run phase
@@ -2778,7 +2785,8 @@ Follow these rules when planning your actions."""
                 skip_synthesis=skip_synthesis,  # Skip expensive synthesis when not needed
                 agent_fingerprint=getattr(self._agent, 'agent_id', None) or f"agent_{id(self._agent)}",
                 step_id=self._current_step_id,  # Pass step_id for parallel execution tracking
-                post_run_mode=self._post_run  # Pass post_run mode ("full" or "kpi_only")
+                post_run_mode=self._post_run,  # Pass post_run mode ("full" or "kpi_only")
+                wait_for_synthesis=wait_for_synthesis  # Wait for synthesis on retry runs (except last)
             )
 
             # response is a dict from ServiceAdapter; handle accordingly
