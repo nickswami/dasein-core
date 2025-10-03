@@ -2714,8 +2714,9 @@ Follow these rules when planning your actions."""
                     trace = self._extract_trace_from_langgraph_result(result, extracted_query)
             
             if not trace:
-                print(f"[DASEIN] No trace available for synthesis")
-                return None
+                # Do not bail out – continue with empty trace so KPIs can still be recorded by the service
+                print(f"[DASEIN] No trace available for synthesis - continuing with empty trace for KPIs")
+                trace = []
             
             print(f"[DASEIN] Sending trace with {len(trace)} steps to post-run service")
             
@@ -2773,6 +2774,56 @@ Follow these rules when planning your actions."""
                 mode_str = "BLOCKING" if wait_for_synthesis else "ASYNC"
                 print(f"[DASEIN] Calling post-run service for rule synthesis ({mode_str} mode)")
             
+            # Compute agent fingerprint for post-run (mirror pre-run minimal fingerprint)
+            def _minimal_agent_fingerprint(agent) -> str:
+                try:
+                    agent_cls = getattr(agent, '__class__', None)
+                    agent_name = getattr(agent_cls, '__name__', '') if agent_cls else ''
+                    module = getattr(agent, '__module__', '') or ''
+                    framework = module.split('.')[0] if module else ''
+                    model_id = ''
+                    llm = getattr(agent, 'llm', None)
+                    if llm is not None:
+                        model_id = (
+                            getattr(llm, 'model', None)
+                            or getattr(llm, 'model_name', None)
+                            or getattr(llm, 'model_id', None)
+                            or getattr(llm, 'model_tag', None)
+                            or ''
+                        )
+                    tool_names = []
+                    tools_attr = getattr(agent, 'tools', None)
+                    if tools_attr:
+                        try:
+                            for t in tools_attr:
+                                name = getattr(t, 'name', None) or getattr(t, '__name__', None) or getattr(t.__class__, '__name__', '')
+                                if name:
+                                    tool_names.append(str(name))
+                        except Exception:
+                            pass
+                    elif getattr(agent, 'toolkit', None):
+                        tk = getattr(agent, 'toolkit')
+                        tk_tools = getattr(tk, 'tools', None) or getattr(tk, 'get_tools', None)
+                        try:
+                            iterable = tk_tools() if callable(tk_tools) else tk_tools
+                            for t in (iterable or []):
+                                name = getattr(t, 'name', None) or getattr(t, '__name__', None) or getattr(t.__class__, '__name__', '')
+                                if name:
+                                    tool_names.append(str(name))
+                        except Exception:
+                            pass
+                    norm = lambda s: str(s).strip().lower().replace(' ', '_') if s is not None else ''
+                    agent_name = norm(agent_name)
+                    framework = norm(framework)
+                    model_id = norm(model_id)
+                    tool_names = [norm(n) for n in tool_names if n]
+                    tools_joined = ','.join(sorted(set(tool_names)))
+                    return f"[[FINGERPRINT]] agent={agent_name} | framework={framework} | model={model_id} | tools={tools_joined}"
+                except Exception:
+                    return getattr(agent, 'agent_id', None) or f"agent_{id(agent)}"
+
+            agent_fingerprint = _minimal_agent_fingerprint(self._agent)
+
             response = self._service_adapter.synthesize_rules(
                 run_id=None,  # Will use stored run_id from pre-run phase
                 trace=cleaned_trace,
