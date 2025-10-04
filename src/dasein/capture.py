@@ -364,6 +364,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._function_calls_made = {}  # Track function calls: {function_name: [{'step': N, 'ts': timestamp}]}
         self._trace = []  # Instance-level trace storage (not global) for thread-safety
         self._verbose = verbose
+        self._start_times = {}  # Track start times for duration calculation: {step_index: datetime}
         self._vprint(f"[DASEIN][CALLBACK] Initialized callback handler (LangGraph: {is_langgraph})")
         if coordinator_node:
             self._vprint(f"[DASEIN][CALLBACK] Coordinator: {coordinator_node}")
@@ -380,7 +381,8 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._function_calls_made = {}
         self._injection_guard = set()
         self._trace = []  # Clear instance trace
-        self._vprint(f"[DASEIN][CALLBACK] Reset run state (trace, function calls, and injection guard cleared)")
+        self._start_times = {}  # Clear start times
+        self._vprint(f"[DASEIN][CALLBACK] Reset run state (trace, function calls, injection guard, and start times cleared)")
     
     def on_llm_start(
         self,
@@ -426,12 +428,16 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                 if target_step_type in ['llm_start', 'chain_start']:
                     rule_triggered_here.append(getattr(rule_obj, 'id', 'unknown'))
         
+        # Record start time for duration calculation
+        start_time = datetime.now()
+        self._start_times[step_index] = start_time
+        
         step = {
             "step_type": "llm_start",
             "tool_name": model_name,
             "args_excerpt": args_excerpt,
             "outcome": "",
-            "ts": datetime.now().isoformat(),
+            "ts": start_time.isoformat(),
             "run_id": None,
             "parent_run_id": None,
             "node": self._current_chain_node,  # LangGraph node name (if available)
@@ -611,6 +617,19 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                 tokens_delta = output_tokens - prev_step['tokens_output']
                 break
         
+        # Calculate duration_ms by matching with corresponding llm_start
+        duration_ms = 0
+        for i in range(len(self._trace) - 1, -1, -1):
+            if self._trace[i].get('step_type') == 'llm_start':
+                # Found the matching llm_start
+                if i in self._start_times:
+                    start_time = self._start_times[i]
+                    end_time = datetime.now()
+                    duration_ms = int((end_time - start_time).total_seconds() * 1000)
+                    # Update the llm_start step with duration_ms
+                    self._trace[i]['duration_ms'] = duration_ms
+                break
+        
         step = {
             "step_type": "llm_end",
             "tool_name": "",
@@ -625,6 +644,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             # GNN step-level fields
             "step_index": step_index,
             "tokens_delta": tokens_delta,
+            "duration_ms": duration_ms,
         }
         self._trace.append(step)
     
@@ -719,12 +739,16 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                 if getattr(rule_obj, 'target_step_type', '') == "tool_start":
                     rule_triggered_here.append(getattr(rule_obj, 'id', 'unknown'))
         
+        # Record start time for duration calculation (keyed by run_id for tools)
+        start_time = datetime.now()
+        self._start_times[run_id] = start_time
+        
         step = {
             "step_type": "tool_start",
             "tool_name": tool_name,
             "args_excerpt": args_excerpt,
             "outcome": "",
-            "ts": datetime.now().isoformat(),
+            "ts": start_time.isoformat(),
             "run_id": run_id,
             "parent_run_id": parent_run_id,
             "node": self._current_chain_node,  # LangGraph node name (if available)
@@ -770,6 +794,20 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         except:
             tool_output_items = 0
         
+        # Calculate duration_ms using run_id to match with tool_start
+        duration_ms = 0
+        if run_id in self._start_times:
+            start_time = self._start_times[run_id]
+            end_time = datetime.now()
+            duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            # Update the corresponding tool_start step with duration_ms
+            for i in range(len(self._trace) - 1, -1, -1):
+                if self._trace[i].get('step_type') == 'tool_start' and self._trace[i].get('run_id') == run_id:
+                    self._trace[i]['duration_ms'] = duration_ms
+                    break
+            # Clean up start time
+            del self._start_times[run_id]
+        
         # Extract available selectors from DOM-like output (web browse agents)
         available_selectors = None
         if tool_name in ['extract_text', 'get_elements', 'extract_hyperlinks', 'extract_content']:
@@ -788,6 +826,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "step_index": step_index,
             "tool_output_chars": tool_output_chars,
             "tool_output_items": tool_output_items,
+            "duration_ms": duration_ms,
         }
         
         # Add available_selectors only if found (keep trace light)
@@ -863,14 +902,20 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         
         args_excerpt = self._excerpt(str(inputs))
         
+        # Record start time for duration calculation
+        step_index = len(self._trace)
+        start_time = datetime.now()
+        self._start_times[f"chain_{step_index}"] = start_time
+        
         step = {
             "step_type": "chain_start",
             "tool_name": chain_name,
             "args_excerpt": args_excerpt,
             "outcome": "",
-            "ts": datetime.now().isoformat(),
+            "ts": start_time.isoformat(),
             "run_id": None,
             "parent_run_id": None,
+            "step_index": step_index,
         }
         self._trace.append(step)
     
@@ -886,6 +931,22 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         
         outcome = self._excerpt(str(outputs))
         
+        # Calculate duration_ms by matching with corresponding chain_start
+        duration_ms = 0
+        for i in range(len(self._trace) - 1, -1, -1):
+            if self._trace[i].get('step_type') == 'chain_start':
+                # Found the matching chain_start
+                chain_key = f"chain_{i}"
+                if chain_key in self._start_times:
+                    start_time = self._start_times[chain_key]
+                    end_time = datetime.now()
+                    duration_ms = int((end_time - start_time).total_seconds() * 1000)
+                    # Update the chain_start step with duration_ms
+                    self._trace[i]['duration_ms'] = duration_ms
+                    # Clean up start time
+                    del self._start_times[chain_key]
+                break
+        
         step = {
             "step_type": "chain_end",
             "tool_name": "",
@@ -894,6 +955,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "ts": datetime.now().isoformat(),
             "run_id": None,
             "parent_run_id": None,
+            "duration_ms": duration_ms,
         }
         self._trace.append(step)
     
