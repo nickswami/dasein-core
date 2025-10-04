@@ -2163,12 +2163,14 @@ Follow these rules when planning your actions."""
         tool_calls = len([step for step in trace if step.get('step_type') == 'tool_start'])
         total_turns = len(trace)
         
-        # Sum up tokens and time
+        # Sum up tokens and calculate average time
         input_tokens = sum(step.get('tokens_input', 0) for step in trace)
         output_tokens = sum(step.get('tokens_output', 0) for step in trace)
         total_tokens = input_tokens + output_tokens
         
-        trace_time_ms = sum(step.get('duration_ms', 0) for step in trace)
+        # Calculate average duration_ms across all steps that have timing data
+        durations = [step.get('duration_ms', 0) for step in trace if step.get('duration_ms', 0) > 0]
+        trace_time_ms = int(sum(durations) / len(durations)) if durations else 0
         
         # Calculate wall time from timestamps (they are ISO format strings)
         if len(trace) > 1:
