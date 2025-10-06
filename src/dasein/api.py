@@ -2825,6 +2825,77 @@ Follow these rules when planning your actions."""
                     return getattr(agent, 'agent_id', None) or f"agent_{id(agent)}"
 
             agent_fingerprint = _minimal_agent_fingerprint(self._agent)
+            
+            # Extract tool metadata for Stage 3.5 tool grounding
+            def _extract_tool_metadata(agent):
+                """
+                Extract tool metadata (name, description, args_schema) from agent.
+                
+                CRITICAL: Extracts ALL available tools from the agent, not just tools used in trace.
+                Why: If agent used wrong tool (e.g., extract_text instead of get_elements), 
+                the trace won't show the correct tool. Stage 3.5 needs to see all options
+                to suggest better alternatives.
+                """
+                tools_metadata = []
+                tools_to_process = []
+                
+                # Get ALL tools from agent (LangChain or LangGraph) - not filtered by trace usage
+                tools_attr = getattr(agent, 'tools', None)
+                if tools_attr:
+                    try:
+                        tools_to_process = list(tools_attr)
+                    except Exception:
+                        pass
+                elif getattr(agent, 'toolkit', None):
+                    tk = getattr(agent, 'toolkit')
+                    tk_tools = getattr(tk, 'tools', None) or getattr(tk, 'get_tools', None)
+                    try:
+                        tools_to_process = list(tk_tools() if callable(tk_tools) else tk_tools or [])
+                    except Exception:
+                        pass
+                
+                # Also try LangGraph tools from compiled graph
+                if hasattr(agent, 'nodes') and 'tools' in agent.nodes:
+                    tools_node = agent.nodes['tools']
+                    if hasattr(tools_node, 'node') and hasattr(tools_node.node, 'steps'):
+                        for step in tools_node.node.steps:
+                            if hasattr(step, 'tools_by_name'):
+                                tools_to_process.extend(step.tools_by_name.values())
+                                break
+                
+                # Extract metadata from each tool
+                for tool in tools_to_process:
+                    try:
+                        tool_meta = {
+                            'name': getattr(tool, 'name', str(tool.__class__.__name__)),
+                            'description': getattr(tool, 'description', ''),
+                        }
+                        
+                        # Extract args_schema if available
+                        if hasattr(tool, 'args_schema') and tool.args_schema:
+                            try:
+                                # Try Pydantic v2 method
+                                if hasattr(tool.args_schema, 'model_json_schema'):
+                                    tool_meta['args_schema'] = tool.args_schema.model_json_schema()
+                                # Fallback to Pydantic v1 method
+                                elif hasattr(tool.args_schema, 'schema'):
+                                    tool_meta['args_schema'] = tool.args_schema.schema()
+                                else:
+                                    tool_meta['args_schema'] = {}
+                            except Exception:
+                                tool_meta['args_schema'] = {}
+                        else:
+                            tool_meta['args_schema'] = {}
+                        
+                        tools_metadata.append(tool_meta)
+                    except Exception as e:
+                        # Skip tools that fail to extract
+                        pass
+                
+                return tools_metadata
+            
+            tools_metadata = _extract_tool_metadata(self._agent)
+            print(f"[DASEIN] Extracted metadata for {len(tools_metadata)} tools")
 
             response = self._service_adapter.synthesize_rules(
                 run_id=None,  # Will use stored run_id from pre-run phase
@@ -2839,7 +2910,8 @@ Follow these rules when planning your actions."""
                 agent_fingerprint=agent_fingerprint,  # Reuse fingerprint from pre-run (line 2613)
                 step_id=self._current_step_id,  # Pass step_id for parallel execution tracking
                 post_run_mode=self._post_run,  # Pass post_run mode ("full" or "kpi_only")
-                wait_for_synthesis=wait_for_synthesis  # Wait for synthesis on retry runs (except last)
+                wait_for_synthesis=wait_for_synthesis,  # Wait for synthesis on retry runs (except last)
+                tools_metadata=tools_metadata  # Tool metadata for Stage 3.5 tool grounding
             )
 
             # response is a dict from ServiceAdapter; handle accordingly

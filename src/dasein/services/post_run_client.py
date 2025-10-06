@@ -32,6 +32,7 @@ class RuleSynthesisRequest:
     skip_synthesis: bool = False
     wait_for_synthesis: bool = False
     step_id: Optional[str] = None
+    tools_metadata: Optional[List[Dict[str, Any]]] = None  # Tool metadata for Stage 3.5 grounding
 
 
 @dataclass
