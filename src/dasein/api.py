@@ -419,6 +419,14 @@ def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking
     Returns:
         A proxy object with .run() and .invoke() methods
     """
+    # CRITICAL: Prevent double-wrapping in Jupyter/Colab when cell is rerun
+    # If agent is already a CognateProxy, unwrap it first to avoid nested retry loops
+    if isinstance(agent, CognateProxy):
+        print("[DASEIN][WARNING] Agent is already wrapped with cognate(). Unwrapping to prevent nested loops.")
+        print(f"[DASEIN][WARNING] Previous config: retry={agent._retry}, performance_tracking={agent._performance_tracking}")
+        print(f"[DASEIN][WARNING] New config: retry={retry}, performance_tracking={performance_tracking}")
+        agent = agent._agent  # Unwrap to get original agent
+    
     global _global_cognate_proxy
     _global_cognate_proxy = CognateProxy(agent, weights=weights, verbose=verbose, retry=retry, performance_tracking=performance_tracking, rule_trace=rule_trace, post_run=post_run, performance_tracking_id=performance_tracking_id, top_k=top_k)
     return _global_cognate_proxy
