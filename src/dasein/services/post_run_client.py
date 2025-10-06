@@ -96,6 +96,7 @@ class PostRunClient:
             "performance_tracking_id": request.performance_tracking_id,
             "skip_synthesis": request.skip_synthesis,
             "wait_for_synthesis": request.wait_for_synthesis,
+            "tools_metadata": request.tools_metadata or [],  # Tool metadata for Stage 3.5 grounding
         }
         
         logger.info(f"Synthesizing rules for run: {request.run_id}")

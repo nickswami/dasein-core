@@ -2896,6 +2896,10 @@ Follow these rules when planning your actions."""
             
             tools_metadata = _extract_tool_metadata(self._agent)
             print(f"[DASEIN] Extracted metadata for {len(tools_metadata)} tools")
+            if tools_metadata:
+                print(f"[DASEIN] Sample tool: {tools_metadata[0].get('name', 'unknown')}")
+            else:
+                print(f"[DASEIN] WARNING: No tools extracted! Agent type: {type(self._agent)}")
 
             response = self._service_adapter.synthesize_rules(
                 run_id=None,  # Will use stored run_id from pre-run phase
