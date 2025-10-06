@@ -32,7 +32,8 @@ class RuleSynthesisRequest:
     skip_synthesis: bool = False
     wait_for_synthesis: bool = False
     step_id: Optional[str] = None
-    tools_metadata: Optional[List[Dict[str, Any]]] = None  # Tool metadata for Stage 3.5 grounding
+    tools_metadata: Optional[List[Dict[str, Any]]] = None  # Tool metadata for Stage 3.5 tool grounding
+    graph_metadata: Optional[Dict[str, Any]] = None  # Graph metadata for Stage 3.5 node grounding
 
 
 @dataclass
@@ -96,7 +97,8 @@ class PostRunClient:
             "performance_tracking_id": request.performance_tracking_id,
             "skip_synthesis": request.skip_synthesis,
             "wait_for_synthesis": request.wait_for_synthesis,
-            "tools_metadata": request.tools_metadata or [],  # Tool metadata for Stage 3.5 grounding
+            "tools_metadata": request.tools_metadata or [],  # Tool metadata for Stage 3.5 tool grounding
+            "graph_metadata": request.graph_metadata or {},  # Graph metadata for Stage 3.5 node grounding
         }
         
         logger.info(f"Synthesizing rules for run: {request.run_id}")

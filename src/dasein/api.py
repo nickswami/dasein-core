@@ -2895,7 +2895,23 @@ Follow these rules when planning your actions."""
                 return tools_metadata
             
             tools_metadata = _extract_tool_metadata(self._agent)
+            
+            # Reuse existing graph analysis (already extracted in __init__)
+            graph_metadata = None
+            if self._is_langgraph and hasattr(self._agent, 'get_graph'):
+                try:
+                    graph = self._agent.get_graph()
+                    graph_metadata = {
+                        'nodes': list(graph.nodes.keys()),
+                        'edges': [{'source': e.source, 'target': e.target} for e in graph.edges],
+                        'is_multi_agent': len(graph.nodes) > 1
+                    }
+                    print(f"[DASEIN] Extracted graph metadata: {len(graph_metadata['nodes'])} nodes, {len(graph_metadata['edges'])} edges")
+                except Exception:
+                    pass
+            
             print(f"[DASEIN] Extracted metadata for {len(tools_metadata)} tools")
+            
             if tools_metadata:
                 print(f"[DASEIN] Sample tool: {tools_metadata[0].get('name', 'unknown')}")
             else:
@@ -2915,7 +2931,8 @@ Follow these rules when planning your actions."""
                 step_id=self._current_step_id,  # Pass step_id for parallel execution tracking
                 post_run_mode=self._post_run,  # Pass post_run mode ("full" or "kpi_only")
                 wait_for_synthesis=wait_for_synthesis,  # Wait for synthesis on retry runs (except last)
-                tools_metadata=tools_metadata  # Tool metadata for Stage 3.5 tool grounding
+                tools_metadata=tools_metadata,  # Tool metadata for Stage 3.5 tool grounding
+                graph_metadata=graph_metadata  # Graph metadata for Stage 3.5 node grounding
             )
 
             # response is a dict from ServiceAdapter; handle accordingly

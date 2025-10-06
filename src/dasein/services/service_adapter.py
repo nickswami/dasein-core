@@ -95,7 +95,8 @@ class ServiceAdapter:
                         max_rules: Optional[int] = 5, performance_tracking_id: Optional[str] = None,
                         skip_synthesis: bool = False, agent_fingerprint: Optional[str] = None,
                         step_id: Optional[str] = None, post_run_mode: str = "full",
-                        wait_for_synthesis: bool = False, tools_metadata: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                        wait_for_synthesis: bool = False, tools_metadata: Optional[List[Dict[str, Any]]] = None,
+                        graph_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Synthesize rules from run telemetry (replaces local rule synthesis)
         
@@ -139,7 +140,8 @@ class ServiceAdapter:
                 skip_synthesis=should_skip_synthesis,
                 wait_for_synthesis=wait_for_synthesis,
                 step_id=step_id,
-                tools_metadata=tools_metadata
+                tools_metadata=tools_metadata,
+                graph_metadata=graph_metadata
             )
             
             response = self.post_run_client.synthesize_rules(request)
