@@ -987,24 +987,71 @@ class CognateProxy:
                 return None
             
             # Try to extract tools from the compiled graph
-            if hasattr(agent, 'nodes') and 'tools' in agent.nodes:
-                tools_node = agent.nodes['tools']
-                if hasattr(tools_node, 'node') and hasattr(tools_node.node, 'steps'):
-                    for step in tools_node.node.steps:
-                        if hasattr(step, 'tools_by_name'):
-                            # Extract original tools (before our wrapping)
-                            tools = []
-                            for tool_name, tool in step.tools_by_name.items():
+            # CRITICAL: For multi-agent, scan ALL nodes (not just 'tools' node)
+            tools = []
+            if hasattr(agent, 'nodes'):
+                print(f" [DASEIN][EXTRACT] Scanning {len(agent.nodes)} LangGraph nodes for tools...")
+                for node_name, node_obj in agent.nodes.items():
+                    if node_name.startswith('__'):  # Skip __start__, __end__
+                        continue
+                    
+                    print(f" [DASEIN][EXTRACT] Checking node: {node_name}")
+                    
+                    # Check if node has tools
+                    if hasattr(node_obj, 'node'):
+                        actual_node = node_obj.node
+                        
+                        # Check for tools_by_name (common in agent nodes)
+                        if hasattr(actual_node, 'tools_by_name'):
+                            for tool_name, tool in actual_node.tools_by_name.items():
                                 # If it's our wrapped tool, get the original
                                 if hasattr(tool, 'original_tool'):
                                     tools.append(tool.original_tool)
                                 else:
                                     tools.append(tool)
-                            params['tools'] = tools
-                            print(f" [DASEIN][EXTRACT] Found {len(tools)} tools")
-                            break
+                            print(f" [DASEIN][EXTRACT] Found {len(actual_node.tools_by_name)} tools in {node_name}.tools_by_name")
+                        
+                        # Check for runnable.tools (dynamic tools like ConductResearch)
+                        if hasattr(actual_node, 'runnable') and hasattr(actual_node.runnable, 'tools'):
+                            runnable_tools = actual_node.runnable.tools
+                            if callable(runnable_tools):
+                                try:
+                                    runnable_tools = runnable_tools()
+                                except:
+                                    pass
+                            if isinstance(runnable_tools, list):
+                                tools.extend(runnable_tools)
+                                print(f" [DASEIN][EXTRACT] Found {len(runnable_tools)} tools in {node_name}.runnable.tools")
+                            else:
+                                tools.append(runnable_tools)
+                                print(f" [DASEIN][EXTRACT] Found 1 tool in {node_name}.runnable.tools")
+                        
+                        # Check for bound.tools (another common pattern)
+                        if hasattr(actual_node, 'bound') and hasattr(actual_node.bound, 'tools'):
+                            bound_tools = actual_node.bound.tools
+                            if isinstance(bound_tools, list):
+                                tools.extend(bound_tools)
+                                print(f" [DASEIN][EXTRACT] Found {len(bound_tools)} tools in {node_name}.bound.tools")
+                            else:
+                                tools.append(bound_tools)
+                                print(f" [DASEIN][EXTRACT] Found 1 tool in {node_name}.bound.tools")
+                        
+                        # Check for steps (legacy pattern)
+                        if hasattr(actual_node, 'steps'):
+                            for step in actual_node.steps:
+                                if hasattr(step, 'tools_by_name'):
+                                    for tool_name, tool in step.tools_by_name.items():
+                                        if hasattr(tool, 'original_tool'):
+                                            tools.append(tool.original_tool)
+                                        else:
+                                            tools.append(tool)
+                                    print(f" [DASEIN][EXTRACT] Found {len(step.tools_by_name)} tools in {node_name}.steps")
+                                    break
             
-            if 'tools' not in params:
+            if tools:
+                params['tools'] = tools
+                print(f" [DASEIN][EXTRACT] Total: {len(tools)} tools extracted")
+            else:
                 print(f" [DASEIN][EXTRACT] No tools found in agent")
                 return None
             
