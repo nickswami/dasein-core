@@ -346,7 +346,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
     Callback handler that captures step-by-step traces and implements rule injection.
     """
     
-    def __init__(self, weights=None, llm=None, is_langgraph=False, coordinator_node=None, planning_nodes=None, verbose: bool = False):
+    def __init__(self, weights=None, llm=None, is_langgraph=False, coordinator_node=None, planning_nodes=None, verbose: bool = False, agent=None, extract_tools_fn=None):
         super().__init__()
         self._weights = weights
         self._selected_rules = []  # Rules selected for this run
@@ -365,6 +365,10 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._trace = []  # Instance-level trace storage (not global) for thread-safety
         self._verbose = verbose
         self._start_times = {}  # Track start times for duration calculation: {step_index: datetime}
+        self._agent = agent  # CRITICAL: Reference to agent for runtime tool extraction
+        self._extract_tools_fn = extract_tools_fn  # Function to extract tools
+        self._runtime_tools_extracted = False  # Flag to extract tools only once during execution
+        self._compiled_tools_metadata = []  # Store extracted tools
         self._vprint(f"[DASEIN][CALLBACK] Initialized callback handler (LangGraph: {is_langgraph})")
         if coordinator_node:
             self._vprint(f"[DASEIN][CALLBACK] Coordinator: {coordinator_node}")
@@ -384,6 +388,21 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._start_times = {}  # Clear start times
         self._vprint(f"[DASEIN][CALLBACK] Reset run state (trace, function calls, injection guard, and start times cleared)")
     
+    def get_compiled_tools_summary(self):
+        """Return 1-line summary of extracted tools."""
+        if not self._compiled_tools_metadata:
+            return None
+        # Group by node
+        by_node = {}
+        for tool in self._compiled_tools_metadata:
+            node = tool.get('node', 'unknown')
+            if node not in by_node:
+                by_node[node] = []
+            by_node[node].append(tool['name'])
+        # Format as: node1:[tool1,tool2] node2:[tool3]
+        parts = [f"{node}:[{','.join(tools)}]" for node, tools in sorted(by_node.items())]
+        return f"{len(self._compiled_tools_metadata)} tools extracted: {' '.join(parts)}"
+    
     def on_llm_start(
         self,
         serialized: Dict[str, Any],
@@ -393,11 +412,49 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         """Called when an LLM starts running."""
         model_name = serialized.get("name", "unknown") if serialized else "unknown"
         
-        # 🎯 CRITICAL: Track current node from kwargs metadata (LangGraph includes langgraph_node)
+        # 🎯 CRITICAL: Track current node from kwargs metadata FIRST (needed for tool extraction)
         if self._is_langgraph and 'metadata' in kwargs and isinstance(kwargs['metadata'], dict):
             if 'langgraph_node' in kwargs['metadata']:
                 node_name = kwargs['metadata']['langgraph_node']
                 self._current_chain_node = node_name
+        
+        # CRITICAL: Extract tools incrementally from each tool-bearing call
+        # Tools are bound node-by-node as they're invoked
+        if self._is_langgraph and self._agent:
+            # Check if THIS call has tools (signal that THIS node's tools are now bound)
+            tools_in_call = None
+            if 'invocation_params' in kwargs:
+                tools_in_call = kwargs['invocation_params'].get('tools') or kwargs['invocation_params'].get('functions')
+            elif 'tools' in kwargs:
+                tools_in_call = kwargs['tools']
+            elif 'functions' in kwargs:
+                tools_in_call = kwargs['functions']
+            
+            if tools_in_call:
+                node_name = self._current_chain_node or 'unknown'
+                # Check if we've already extracted tools for this node
+                existing_nodes = {t.get('node') for t in self._compiled_tools_metadata}
+                if node_name not in existing_nodes:
+                    try:
+                        # Extract tools from this specific call (provider-resolved schemas)
+                        for tool in tools_in_call:
+                            tool_meta = {
+                                'name': tool.get('name') or tool.get('function', {}).get('name', 'unknown'),
+                                'description': tool.get('description') or tool.get('function', {}).get('description', ''),
+                                'node': node_name
+                            }
+                            
+                            # Get args schema
+                            if 'parameters' in tool:
+                                tool_meta['args_schema'] = tool['parameters']
+                            elif 'function' in tool and 'parameters' in tool['function']:
+                                tool_meta['args_schema'] = tool['function']['parameters']
+                            else:
+                                tool_meta['args_schema'] = {}
+                            
+                            self._compiled_tools_metadata.append(tool_meta)
+                    except Exception:
+                        pass  # Silently fail
         
         # Inject rules if applicable
         modified_prompts = self._inject_rule_if_applicable("llm_start", model_name, prompts)
@@ -1219,15 +1276,24 @@ TURN 2+ (After ACK):
                             self._vprint(f"[DASEIN][CALLBACK] Skipping planning rule {getattr(rule, 'id', 'unknown')} for LangGraph agent (already injected at creation)")
                             continue
                 
-                # 🎯 COORDINATOR-GATED INJECTION: Only apply planning rules when executing planning-capable nodes
+                # 🎯 NODE-SCOPED INJECTION: Check target_node if specified (for node-specific rules)
                 if target_step_type in ['llm_start', 'chain_start']:
-                    # If we have planning nodes, only inject planning rules when we're in one of them
-                    if hasattr(self, '_planning_nodes') and self._planning_nodes:
-                        current_node = getattr(self, '_current_chain_node', None)
-                        # Check if current node is in the planning nodes set
-                        if current_node not in self._planning_nodes:
-                            # Silently skip non-planning nodes
+                    current_node = getattr(self, '_current_chain_node', None)
+                    
+                    # Check if this rule targets a specific node
+                    target_node = getattr(rule, 'target_node', None)
+                    if target_node:
+                        # Rule has explicit target_node - ONLY inject if we're in that node
+                        if current_node != target_node:
+                            # Silently skip - not the target node
                             continue
+                    else:
+                        # No target_node specified - use existing planning_nodes logic (backward compatibility)
+                        if hasattr(self, '_planning_nodes') and self._planning_nodes:
+                            # Check if current node is in the planning nodes set
+                            if current_node not in self._planning_nodes:
+                                # Silently skip non-planning nodes
+                                continue
                         # Injecting into planning node (logged in detailed injection log below)
                     
                     advice = getattr(rule, 'advice_text', getattr(rule, 'advice', ''))
@@ -1350,6 +1416,8 @@ Rules to Enforce:
         try:
             # Inject rules that target tool_start
             tool_rules = []
+            current_node = getattr(self, '_current_chain_node', None)
+            
             for rule_meta in self._selected_rules:
                 # Handle tuple format from select_rules: (rule, metadata)
                 if isinstance(rule_meta, tuple) and len(rule_meta) == 2:
@@ -1360,6 +1428,15 @@ Rules to Enforce:
 
                 # Only apply rules that target tool_start
                 if rule.target_step_type == "tool_start":
+                    # 🎯 NODE-SCOPED INJECTION: Check target_node if specified
+                    target_node = getattr(rule, 'target_node', None)
+                    if target_node:
+                        # Rule has explicit target_node - ONLY inject if we're in that node
+                        if current_node != target_node:
+                            # Silently skip - not the target node
+                            continue
+                    # No target_node specified - inject into any node using this tool (backward compat)
+                    
                     tool_rules.append(rule)
                     self._vprint(f"[DASEIN][APPLY] Tool rule: {rule.advice_text[:100]}...")
 

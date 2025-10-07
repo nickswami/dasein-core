@@ -736,7 +736,7 @@ class CognateProxy:
                 print(f"[DASEIN] Coordinator node: {coordinator_node}")
                 planning_nodes = self._identify_planning_nodes(agent, coordinator_node)
         
-        self._callback_handler = DaseinCallbackHandler(weights=weights, llm=None, is_langgraph=self._is_langgraph, coordinator_node=coordinator_node, planning_nodes=planning_nodes, verbose=verbose)
+        self._callback_handler = DaseinCallbackHandler(weights=weights, llm=None, is_langgraph=self._is_langgraph, coordinator_node=coordinator_node, planning_nodes=planning_nodes, verbose=verbose, agent=self._agent, extract_tools_fn=self._extract_tool_metadata)
         self._langgraph_params = None
         self._original_agent = agent  # Keep reference to original
         self._agent_was_recreated = False  # Track if agent recreation succeeded
@@ -973,6 +973,168 @@ class CognateProxy:
             self._vprint(f"[DASEIN][PLANNING_NODES] ERROR: {e}")
             return set()
     
+    def _extract_tool_metadata(self, agent):
+        """
+        Extract tool metadata (name, description, args_schema) from agent.
+        
+        CRITICAL: Extracts ALL available tools from the agent, not just tools used in trace.
+        Why: If agent used wrong tool (e.g., extract_text instead of get_elements), 
+        the trace won't show the correct tool. Stage 3.5 needs to see all options
+        to suggest better alternatives.
+        
+        For multi-agent systems, preserves node→tool mapping so Stage 3.5 knows
+        which tools are available in which nodes (critical for grounding).
+        """
+        tools_metadata = []
+        tools_to_process = []  # Format: (tool, node_name or None)
+        
+        # Get ALL tools from agent (LangChain or LangGraph) - not filtered by trace usage
+        tools_attr = getattr(agent, 'tools', None)
+        if tools_attr:
+            try:
+                # Top-level tools have no node context
+                tools_to_process = [(t, None) for t in list(tools_attr)]
+            except Exception:
+                pass
+        elif getattr(agent, 'toolkit', None):
+            tk = getattr(agent, 'toolkit')
+            tk_tools = getattr(tk, 'tools', None) or getattr(tk, 'get_tools', None)
+            try:
+                # Toolkit tools have no node context
+                tools_to_process = [(t, None) for t in list(tk_tools() if callable(tk_tools) else tk_tools or [])]
+            except Exception:
+                pass
+        
+        # Also try LangGraph tools from compiled graph
+        # For multi-agent systems, scan ALL nodes for tools (not just 'tools' node)
+        # CRITICAL: Preserve node→tool mapping for proper grounding
+        # CRITICAL: Use agent.get_graph().nodes (same as planning node discovery)
+        # NOT agent.nodes which returns different objects without .data attribute
+        if hasattr(agent, 'get_graph'):
+            graph = agent.get_graph()
+            nodes = graph.nodes
+            for node_name, node_obj in nodes.items():
+                if node_name.startswith('__'):  # Skip __start__, __end__
+                    continue
+                
+                # Check if this is a subgraph with child nodes (like research_supervisor)
+                # CRITICAL: Use node_obj.data (compiled graph) not node_obj.node (implementation)
+                if hasattr(node_obj, 'data') and hasattr(node_obj.data, 'nodes') and 'Compiled' in type(node_obj.data).__name__:
+                    try:
+                        subgraph = node_obj.data.get_graph()
+                        for sub_node_name, sub_node_obj in subgraph.nodes.items():
+                            if sub_node_name.startswith('__'):
+                                continue
+                            if hasattr(sub_node_obj, 'node'):
+                                sub_actual = sub_node_obj.node
+                                # Use fully qualified node name: parent.child
+                                full_node_name = f"{node_name}.{sub_node_name}"
+                                
+                                # Check all tool patterns in subgraph children
+                                if hasattr(sub_actual, 'tools_by_name'):
+                                    tools_to_process.extend([(t, full_node_name) for t in sub_actual.tools_by_name.values()])
+                                if hasattr(sub_actual, 'runnable') and hasattr(sub_actual.runnable, 'tools'):
+                                    sub_tools = sub_actual.runnable.tools
+                                    if callable(sub_tools):
+                                        try:
+                                            sub_tools = sub_tools()
+                                        except:
+                                            pass
+                                    if isinstance(sub_tools, list):
+                                        tools_to_process.extend([(t, full_node_name) for t in sub_tools])
+                                        print(f" [DASEIN][EXTRACT]     Found {len(sub_tools)} tools in {full_node_name}.runnable.tools")
+                                    else:
+                                        tools_to_process.append((sub_tools, full_node_name))
+                                        print(f" [DASEIN][EXTRACT]     Found 1 tool in {full_node_name}.runnable.tools")
+                    except Exception as e:
+                        print(f" [DASEIN][EXTRACT]   Failed to analyze subgraph: {e}")
+                
+                # Check if node has steps with tools
+                if hasattr(node_obj, 'node'):
+                    actual_node = node_obj.node
+                    
+                    # Check for tools_by_name (common in agent nodes)
+                    if hasattr(actual_node, 'tools_by_name'):
+                        node_tools = actual_node.tools_by_name.values()
+                        tools_to_process.extend([(t, node_name) for t in node_tools])
+                        print(f" [DASEIN][EXTRACT] Found {len(node_tools)} tools in {node_name}.tools_by_name")
+                    
+                    # Check for runnable.tools (dynamic tools like ConductResearch)
+                    if hasattr(actual_node, 'runnable') and hasattr(actual_node.runnable, 'tools'):
+                        runnable_tools = actual_node.runnable.tools
+                        if callable(runnable_tools):
+                            try:
+                                runnable_tools = runnable_tools()
+                            except:
+                                pass
+                        if isinstance(runnable_tools, list):
+                            tools_to_process.extend([(t, node_name) for t in runnable_tools])
+                            print(f" [DASEIN][EXTRACT] Found {len(runnable_tools)} tools in {node_name}.runnable.tools")
+                        else:
+                            tools_to_process.append((runnable_tools, node_name))
+                            print(f" [DASEIN][EXTRACT] Found 1 tool in {node_name}.runnable.tools")
+                    
+                    # Check for bound.tools (another common pattern)
+                    if hasattr(actual_node, 'bound') and hasattr(actual_node.bound, 'tools'):
+                        bound_tools = actual_node.bound.tools
+                        if isinstance(bound_tools, list):
+                            tools_to_process.extend([(t, node_name) for t in bound_tools])
+                            print(f" [DASEIN][EXTRACT] Found {len(bound_tools)} tools in {node_name}.bound.tools")
+                        else:
+                            tools_to_process.append((bound_tools, node_name))
+                            print(f" [DASEIN][EXTRACT] Found 1 tool in {node_name}.bound.tools")
+                    
+                    # Check for steps (legacy pattern)
+                    if hasattr(actual_node, 'steps'):
+                        for step in actual_node.steps:
+                            if hasattr(step, 'tools_by_name'):
+                                step_tools = step.tools_by_name.values()
+                                tools_to_process.extend([(t, node_name) for t in step_tools])
+                                print(f" [DASEIN][EXTRACT] Found {len(step_tools)} tools in {node_name}.steps")
+                                break
+        
+        # Extract metadata from each tool (with node context for multi-agent)
+        for tool_tuple in tools_to_process:
+            try:
+                # Unpack (tool, node_name)
+                if isinstance(tool_tuple, tuple) and len(tool_tuple) == 2:
+                    tool, node_name = tool_tuple
+                else:
+                    tool = tool_tuple
+                    node_name = None
+                
+                tool_meta = {
+                    'name': getattr(tool, 'name', str(tool.__class__.__name__)),
+                    'description': getattr(tool, 'description', ''),
+                }
+                
+                # CRITICAL: Add node context for multi-agent systems (for grounding)
+                if node_name:
+                    tool_meta['node'] = node_name
+                
+                # Extract args_schema if available
+                if hasattr(tool, 'args_schema') and tool.args_schema:
+                    try:
+                        # Try Pydantic v2 method
+                        if hasattr(tool.args_schema, 'model_json_schema'):
+                            tool_meta['args_schema'] = tool.args_schema.model_json_schema()
+                        # Fallback to Pydantic v1 method
+                        elif hasattr(tool.args_schema, 'schema'):
+                            tool_meta['args_schema'] = tool.args_schema.schema()
+                        else:
+                            tool_meta['args_schema'] = {}
+                    except Exception:
+                        tool_meta['args_schema'] = {}
+                else:
+                    tool_meta['args_schema'] = {}
+                
+                tools_metadata.append(tool_meta)
+            except Exception as e:
+                # Skip tools that fail to extract
+                pass
+        
+        return tools_metadata
+    
     def _extract_langgraph_params(self, agent):
         """ CRITICAL: Extract LangGraph agent creation parameters for recreation."""
         try:
@@ -989,13 +1151,73 @@ class CognateProxy:
             # Try to extract tools from the compiled graph
             # CRITICAL: For multi-agent, scan ALL nodes (not just 'tools' node)
             tools = []
-            if hasattr(agent, 'nodes'):
-                print(f" [DASEIN][EXTRACT] Scanning {len(agent.nodes)} LangGraph nodes for tools...")
-                for node_name, node_obj in agent.nodes.items():
+            # CRITICAL: Use agent.get_graph().nodes (same as planning node discovery)
+            # NOT agent.nodes which returns different objects without .data attribute
+            if hasattr(agent, 'get_graph'):
+                graph = agent.get_graph()
+                nodes = graph.nodes
+                print(f" [DASEIN][EXTRACT] Scanning {len(nodes)} LangGraph nodes for tools...")
+                for node_name, node_obj in nodes.items():
                     if node_name.startswith('__'):  # Skip __start__, __end__
                         continue
                     
                     print(f" [DASEIN][EXTRACT] Checking node: {node_name}")
+                    
+                    # Check if this is a subgraph with child nodes (like research_supervisor)
+                    # CRITICAL: Use node_obj.data (compiled graph) not node_obj.node (implementation)
+                    if hasattr(node_obj, 'data') and hasattr(node_obj.data, 'nodes') and 'Compiled' in type(node_obj.data).__name__:
+                        try:
+                            subgraph = node_obj.data.get_graph()
+                            print(f" [DASEIN][EXTRACT]   {node_name} is a subgraph with {len(subgraph.nodes)} child nodes")
+                            for sub_node_name, sub_node_obj in subgraph.nodes.items():
+                                if sub_node_name.startswith('__'):
+                                    continue
+                                print(f" [DASEIN][EXTRACT]   Checking subgraph child: {sub_node_name}")
+                                if hasattr(sub_node_obj, 'node'):
+                                    sub_actual = sub_node_obj.node
+                                    
+                                    # Debug: print what attributes this node has
+                                    attrs = [a for a in dir(sub_actual) if not a.startswith('_')]
+                                    print(f" [DASEIN][EXTRACT]     Node attributes: {', '.join(attrs[:10])}...")
+                                    
+                                    # Check all tool patterns in subgraph children
+                                    if hasattr(sub_actual, 'tools_by_name'):
+                                        for tool_name, tool in sub_actual.tools_by_name.items():
+                                            if hasattr(tool, 'original_tool'):
+                                                tools.append(tool.original_tool)
+                                            else:
+                                                tools.append(tool)
+                                        print(f" [DASEIN][EXTRACT]     Found {len(sub_actual.tools_by_name)} tools in {node_name}.{sub_node_name}.tools_by_name")
+                                    if hasattr(sub_actual, 'runnable') and hasattr(sub_actual.runnable, 'tools'):
+                                        sub_tools = sub_actual.runnable.tools
+                                        if callable(sub_tools):
+                                            try:
+                                                sub_tools = sub_tools()
+                                            except:
+                                                pass
+                                        if isinstance(sub_tools, list):
+                                            tools.extend(sub_tools)
+                                            print(f" [DASEIN][EXTRACT]     Found {len(sub_tools)} tools in {node_name}.{sub_node_name}.runnable.tools")
+                                        else:
+                                            tools.append(sub_tools)
+                                            print(f" [DASEIN][EXTRACT]     Found 1 tool in {node_name}.{sub_node_name}.runnable.tools")
+                                    
+                                    # Also check if sub_actual IS a callable with tools (another pattern)
+                                    if callable(sub_actual) and hasattr(sub_actual, 'tools'):
+                                        direct_tools = sub_actual.tools
+                                        if callable(direct_tools):
+                                            try:
+                                                direct_tools = direct_tools()
+                                            except:
+                                                pass
+                                        if isinstance(direct_tools, list):
+                                            tools.extend(direct_tools)
+                                            print(f" [DASEIN][EXTRACT]     Found {len(direct_tools)} tools in {node_name}.{sub_node_name} (direct)")
+                                        elif direct_tools:
+                                            tools.append(direct_tools)
+                                            print(f" [DASEIN][EXTRACT]     Found 1 tool in {node_name}.{sub_node_name} (direct)")
+                        except Exception as e:
+                            print(f" [DASEIN][EXTRACT]   Failed to analyze subgraph: {e}")
                     
                     # Check if node has tools
                     if hasattr(node_obj, 'node'):
@@ -1780,6 +2002,12 @@ Follow these rules when planning your actions."""
         # Run the agent
         result = self._agent.invoke(*args, **kwargs)
         
+        # Print tools summary if available
+        if hasattr(self._callback_handler, 'get_compiled_tools_summary'):
+            summary = self._callback_handler.get_compiled_tools_summary()
+            if summary:
+                print(f"[DASEIN] {summary}")
+        
         #  FIXED: Extract trace for display but never calculate KPIs locally
         # Service-first architecture: All KPI calculation done by distributed services
         self._vprint(f"[DASEIN][SERVICE_FIRST] Extracting trace for display - KPIs handled by post-run API service")
@@ -1850,6 +2078,12 @@ Follow these rules when planning your actions."""
         
         # Run the agent asynchronously
         result = await self._agent.ainvoke(*args, **kwargs)
+        
+        # Print tools summary if available
+        if hasattr(self._callback_handler, 'get_compiled_tools_summary'):
+            summary = self._callback_handler.get_compiled_tools_summary()
+            if summary:
+                print(f"[DASEIN] {summary}")
         
         #  FIXED: Extract trace for display but never calculate KPIs locally
         # Service-first architecture: All KPI calculation done by distributed services
@@ -2881,150 +3115,13 @@ Follow these rules when planning your actions."""
 
             agent_fingerprint = _minimal_agent_fingerprint(self._agent)
             
-            # Extract tool metadata for Stage 3.5 tool grounding
-            def _extract_tool_metadata(agent):
-                """
-                Extract tool metadata (name, description, args_schema) from agent.
-                
-                CRITICAL: Extracts ALL available tools from the agent, not just tools used in trace.
-                Why: If agent used wrong tool (e.g., extract_text instead of get_elements), 
-                the trace won't show the correct tool. Stage 3.5 needs to see all options
-                to suggest better alternatives.
-                
-                For multi-agent systems, preserves node→tool mapping so Stage 3.5 knows
-                which tools are available in which nodes (critical for grounding).
-                """
-                tools_metadata = []
-                tools_to_process = []  # Format: (tool, node_name or None)
-                
-                # Get ALL tools from agent (LangChain or LangGraph) - not filtered by trace usage
-                tools_attr = getattr(agent, 'tools', None)
-                if tools_attr:
-                    try:
-                        # Top-level tools have no node context
-                        tools_to_process = [(t, None) for t in list(tools_attr)]
-                    except Exception:
-                        pass
-                elif getattr(agent, 'toolkit', None):
-                    tk = getattr(agent, 'toolkit')
-                    tk_tools = getattr(tk, 'tools', None) or getattr(tk, 'get_tools', None)
-                    try:
-                        # Toolkit tools have no node context
-                        tools_to_process = [(t, None) for t in list(tk_tools() if callable(tk_tools) else tk_tools or [])]
-                    except Exception:
-                        pass
-                
-                # Also try LangGraph tools from compiled graph
-                # For multi-agent systems, scan ALL nodes for tools (not just 'tools' node)
-                # CRITICAL: Preserve node→tool mapping for proper grounding
-                if hasattr(agent, 'nodes'):
-                    print(f" [DASEIN][EXTRACT] Scanning {len(agent.nodes)} LangGraph nodes for tools...")
-                    for node_name, node_obj in agent.nodes.items():
-                        if node_name.startswith('__'):  # Skip __start__, __end__
-                            continue
-                        
-                        print(f" [DASEIN][EXTRACT] Checking node: {node_name}")
-                        
-                        # Check if node has steps with tools
-                        if hasattr(node_obj, 'node'):
-                            actual_node = node_obj.node
-                            
-                            # Check for tools_by_name (common in agent nodes)
-                            if hasattr(actual_node, 'tools_by_name'):
-                                node_tools = actual_node.tools_by_name.values()
-                                tools_to_process.extend([(t, node_name) for t in node_tools])
-                                print(f" [DASEIN][EXTRACT] Found {len(node_tools)} tools in {node_name}.tools_by_name")
-                            
-                            # Check for runnable.tools (dynamic tools like ConductResearch)
-                            if hasattr(actual_node, 'runnable') and hasattr(actual_node.runnable, 'tools'):
-                                runnable_tools = actual_node.runnable.tools
-                                if callable(runnable_tools):
-                                    try:
-                                        runnable_tools = runnable_tools()
-                                    except:
-                                        pass
-                                if isinstance(runnable_tools, list):
-                                    tools_to_process.extend([(t, node_name) for t in runnable_tools])
-                                    print(f" [DASEIN][EXTRACT] Found {len(runnable_tools)} tools in {node_name}.runnable.tools")
-                                else:
-                                    tools_to_process.append((runnable_tools, node_name))
-                                    print(f" [DASEIN][EXTRACT] Found 1 tool in {node_name}.runnable.tools")
-                            
-                            # Check for bound.tools (another common pattern)
-                            if hasattr(actual_node, 'bound') and hasattr(actual_node.bound, 'tools'):
-                                bound_tools = actual_node.bound.tools
-                                if isinstance(bound_tools, list):
-                                    tools_to_process.extend([(t, node_name) for t in bound_tools])
-                                    print(f" [DASEIN][EXTRACT] Found {len(bound_tools)} tools in {node_name}.bound.tools")
-                                else:
-                                    tools_to_process.append((bound_tools, node_name))
-                                    print(f" [DASEIN][EXTRACT] Found 1 tool in {node_name}.bound.tools")
-                            
-                            # Check for steps (legacy pattern)
-                            if hasattr(actual_node, 'steps'):
-                                for step in actual_node.steps:
-                                    if hasattr(step, 'tools_by_name'):
-                                        step_tools = step.tools_by_name.values()
-                                        tools_to_process.extend([(t, node_name) for t in step_tools])
-                                        print(f" [DASEIN][EXTRACT] Found {len(step_tools)} tools in {node_name}.steps")
-                                        break
-                
-                # Extract metadata from each tool (with node context for multi-agent)
-                for tool_tuple in tools_to_process:
-                    try:
-                        # Unpack (tool, node_name)
-                        if isinstance(tool_tuple, tuple) and len(tool_tuple) == 2:
-                            tool, node_name = tool_tuple
-                        else:
-                            tool = tool_tuple
-                            node_name = None
-                        
-                        tool_meta = {
-                            'name': getattr(tool, 'name', str(tool.__class__.__name__)),
-                            'description': getattr(tool, 'description', ''),
-                        }
-                        
-                        # CRITICAL: Add node context for multi-agent systems (for grounding)
-                        if node_name:
-                            tool_meta['node'] = node_name
-                        
-                        # Extract args_schema if available
-                        if hasattr(tool, 'args_schema') and tool.args_schema:
-                            try:
-                                # Try Pydantic v2 method
-                                if hasattr(tool.args_schema, 'model_json_schema'):
-                                    tool_meta['args_schema'] = tool.args_schema.model_json_schema()
-                                # Fallback to Pydantic v1 method
-                                elif hasattr(tool.args_schema, 'schema'):
-                                    tool_meta['args_schema'] = tool.args_schema.schema()
-                                else:
-                                    tool_meta['args_schema'] = {}
-                            except Exception:
-                                tool_meta['args_schema'] = {}
-                        else:
-                            tool_meta['args_schema'] = {}
-                        
-                        tools_metadata.append(tool_meta)
-                    except Exception as e:
-                        # Skip tools that fail to extract
-                        pass
-                
-                # Print node→tools mapping for debugging multi-agent systems
-                if tools_metadata:
-                    print(f" [DASEIN][EXTRACT] Extracted metadata for {len(tools_metadata)} tools")
-                    node_tool_map = {}
-                    for tm in tools_metadata:
-                        node = tm.get('node', 'top-level')
-                        if node not in node_tool_map:
-                            node_tool_map[node] = []
-                        node_tool_map[node].append(tm['name'])
-                    print(f" [DASEIN][EXTRACT] Node→Tools mapping:")
-                    for node, tools in sorted(node_tool_map.items()):
-                        print(f"   {node}: {tools}")
-                
-                return tools_metadata
-            
-            tools_metadata = _extract_tool_metadata(self._agent)
+            # Get tool metadata from callback handler (extracted during runtime)
+            tools_metadata = []
+            if hasattr(self._callback_handler, '_compiled_tools_metadata'):
+                tools_metadata = self._callback_handler._compiled_tools_metadata
+            # Fallback: try extracting now (may not work if tools unbound)
+            if not tools_metadata:
+                tools_metadata = self._extract_tool_metadata(self._agent)
             
             # Reuse existing graph analysis (already extracted in __init__)
             graph_metadata = None
