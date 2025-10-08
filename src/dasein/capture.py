@@ -2,6 +2,11 @@
 Trace capture functionality for Dasein.
 """
 
+# Suppress third-party warnings triggered by pipecleaner dependencies
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning, message='.*torch.distributed.reduce_op.*')
+warnings.filterwarnings('ignore', category=DeprecationWarning, message='.*Importing chat models from langchain.*')
+
 import hashlib
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime
@@ -82,6 +87,9 @@ class DaseinToolWrapper(BaseTool):
                 # Use original input
                 result = self.original_tool._run(*args, **kwargs)
             
+            # 🧹 PIPECLEANER: Apply deduplication to tool result (microturn-style interception)
+            result = self._apply_pipecleaner_to_result(result)
+            
             # Capture the tool output in the trace
             self._vprint(f"[DASEIN][TOOL_WRAPPER] About to capture tool output for {self.name}")
             self._capture_tool_output(self.name, args, kwargs, result)
@@ -136,6 +144,9 @@ class DaseinToolWrapper(BaseTool):
                 # Use original input
                 result = await self.original_tool._arun(*args, **kwargs)
             
+            # 🧹 PIPECLEANER: Apply deduplication to tool result (microturn-style interception)
+            result = self._apply_pipecleaner_to_result(result)
+            
             # Capture the tool output in the trace
             self._vprint(f"[DASEIN][TOOL_WRAPPER] About to capture tool output for {self.name}")
             self._capture_tool_output(self.name, args, kwargs, result)
@@ -164,10 +175,15 @@ class DaseinToolWrapper(BaseTool):
         if modified_input != original_input:
             self._vprint(f"[DASEIN][TOOL_WRAPPER] Applied micro-turn injection for {self.name}: {original_input[:50]}... -> {modified_input[:50]}...")
             # Use modified input
-            return await self.original_tool.ainvoke(modified_input, config, **kwargs)
+            result = await self.original_tool.ainvoke(modified_input, config, **kwargs)
         else:
             # Use original input
-            return await self.original_tool.ainvoke(input_data, config, **kwargs)
+            result = await self.original_tool.ainvoke(input_data, config, **kwargs)
+        
+        # 🧹 PIPECLEANER: Apply deduplication to tool result (microturn-style interception)
+        result = self._apply_pipecleaner_to_result(result)
+        
+        return result
     
     def _apply_micro_turn_injection(self, original_input: str) -> str:
         """Apply micro-turn injection to the tool input."""
@@ -292,6 +308,51 @@ Apply the rule to fix the input. Return only the corrected input, nothing else."
             self._vprint(f"[DASEIN][MICROTURN] Error executing micro-turn LLM call: {e}")
             return original_input
     
+    def _apply_pipecleaner_to_result(self, result):
+        """
+        Apply pipecleaner deduplication to tool result (microturn-style interception).
+        
+        This is called right after tool execution, before returning result to agent.
+        Similar to how microturn intercepts LLM responses.
+        """
+        try:
+            # Get callback handler's rules
+            if not self.callback_handler or not hasattr(self.callback_handler, '_selected_rules'):
+                return result
+            
+            # Convert result to string
+            result_str = str(result)
+            
+            print(f"[PIPECLEANER DEBUG] Tool wrapper intercepted: {self.name}")
+            print(f"[PIPECLEANER DEBUG] Result length: {len(result_str)} chars")
+            print(f"[PIPECLEANER DEBUG] Rules count: {len(self.callback_handler._selected_rules)}")
+            
+            # Apply pipecleaner if filter search rule exists
+            from .pipecleaner import apply_pipecleaner_if_applicable
+            
+            # Get or initialize cached model from callback handler
+            cached_model = getattr(self.callback_handler, '_pipecleaner_embedding_model', None)
+            
+            deduplicated_str, model = apply_pipecleaner_if_applicable(
+                self.name,
+                result_str,
+                self.callback_handler._selected_rules,
+                cached_model=cached_model
+            )
+            
+            # Cache model for next search
+            if model is not None:
+                self.callback_handler._pipecleaner_embedding_model = model
+            
+            # Return deduplicated result (or original if no filter applied)
+            return deduplicated_str
+            
+        except Exception as e:
+            print(f"[PIPECLEANER] Error in result interception: {e}")
+            import traceback
+            traceback.print_exc()
+            return result
+    
     def _capture_tool_output(self, tool_name, args, kwargs, result):
         """Capture tool output in the trace."""
         try:
@@ -357,6 +418,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._discovered_tools = set()  # Track tools discovered during execution
         self._wrapped_dynamic_tools = {}  # Cache of wrapped dynamic tools
         self._is_langgraph = is_langgraph  # Flag to skip planning rule injection for LangGraph
+        self._run_number = 1  # Track which run this is (for microturn testing)
         self._coordinator_node = coordinator_node  # Coordinator node (for future targeted injection)
         self._planning_nodes = planning_nodes if planning_nodes else set()  # Planning-capable nodes (including subgraph children)
         self._current_chain_node = None  # Track current LangGraph node
@@ -369,7 +431,14 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._extract_tools_fn = extract_tools_fn  # Function to extract tools
         self._runtime_tools_extracted = False  # Flag to extract tools only once during execution
         self._compiled_tools_metadata = []  # Store extracted tools
-        self._vprint(f"[DASEIN][CALLBACK] Initialized callback handler (LangGraph: {is_langgraph})")
+        self._pipecleaner_embedding_model = None  # Cache embedding model for this run
+        self._current_tool_name = None  # Track currently executing tool for hotpath deduplication
+        
+        # Generate stable run_id for corpus deduplication
+        import uuid
+        self.run_id = str(uuid.uuid4())
+        
+        self._vprint(f"[DASEIN][CALLBACK] Initialized callback handler (LangGraph: {is_langgraph}, run_id: {self.run_id[:8]})")
         if coordinator_node:
             self._vprint(f"[DASEIN][CALLBACK] Coordinator: {coordinator_node}")
         if planning_nodes:
@@ -386,7 +455,8 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._injection_guard = set()
         self._trace = []  # Clear instance trace
         self._start_times = {}  # Clear start times
-        self._vprint(f"[DASEIN][CALLBACK] Reset run state (trace, function calls, injection guard, and start times cleared)")
+        self._run_number = getattr(self, '_run_number', 1) + 1  # Increment run number
+        self._vprint(f"[DASEIN][CALLBACK] Reset run state (trace, function calls, injection guard, and start times cleared) - now on RUN {self._run_number}")
     
     def get_compiled_tools_summary(self):
         """Return 1-line summary of extracted tools."""
@@ -403,14 +473,401 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         parts = [f"{node}:[{','.join(tools)}]" for node, tools in sorted(by_node.items())]
         return f"{len(self._compiled_tools_metadata)} tools extracted: {' '.join(parts)}"
     
+    def _patch_tools_for_node(self, node_name: str):
+        """
+        Patch tool objects for a specific node when they're discovered at runtime.
+        
+        Called from on_llm_start when tools are detected for a node.
+        """
+        try:
+            print(f"\n{'='*70}")
+            print(f"[DASEIN][TOOL_PATCH] 🔧 Patching tools for node: {node_name}")
+            print(f"{'='*70}")
+            
+            from .wrappers import patch_tool_instance
+            
+            # Track patched tools to avoid double-patching
+            if not hasattr(self, '_patched_tools'):
+                self._patched_tools = set()
+                print(f"[DASEIN][TOOL_PATCH] Initialized patched tools tracker")
+            
+            # Find the actual tool objects for this node in the agent graph
+            print(f"[DASEIN][TOOL_PATCH] Searching for tool objects in node '{node_name}'...")
+            tool_objects = self._find_tool_objects_for_node(node_name)
+            
+            if not tool_objects:
+                print(f"[DASEIN][TOOL_PATCH] ⚠️  No tool objects found for node '{node_name}'")
+                print(f"{'='*70}\n")
+                return
+            
+            print(f"[DASEIN][TOOL_PATCH] ✓ Found {len(tool_objects)} tool object(s)")
+            
+            # Patch each tool
+            patched_count = 0
+            for i, tool_obj in enumerate(tool_objects, 1):
+                tool_name = getattr(tool_obj, 'name', 'unknown')
+                tool_type = type(tool_obj).__name__
+                tool_id = f"{node_name}:{tool_name}"
+                
+                print(f"[DASEIN][TOOL_PATCH] [{i}/{len(tool_objects)}] Tool: '{tool_name}' (type: {tool_type})")
+                
+                if tool_id in self._patched_tools:
+                    print(f"[DASEIN][TOOL_PATCH]   ⏭️  Already patched, skipping")
+                else:
+                    print(f"[DASEIN][TOOL_PATCH]   🔨 Patching...")
+                    if patch_tool_instance(tool_obj, self):
+                        self._patched_tools.add(tool_id)
+                        patched_count += 1
+                        print(f"[DASEIN][TOOL_PATCH]   ✅ Successfully patched '{tool_name}'")
+                    else:
+                        print(f"[DASEIN][TOOL_PATCH]   ❌ Failed to patch '{tool_name}'")
+            
+            print(f"[DASEIN][TOOL_PATCH] Summary: Patched {patched_count}/{len(tool_objects)} tools")
+            print(f"[DASEIN][TOOL_PATCH] Total tools patched so far: {len(self._patched_tools)}")
+            print(f"{'='*70}\n")
+        
+        except Exception as e:
+            print(f"[DASEIN][TOOL_PATCH] ❌ ERROR patching tools for node {node_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"{'='*70}\n")
+    
+    def _search_node_recursively(self, node_name: str, nodes: dict, depth: int = 0) -> list:
+        """Recursively search for a node by name in graphs and subgraphs."""
+        indent = "  " * depth
+        tool_objects = []
+        
+        for parent_name, parent_node in nodes.items():
+            if parent_name.startswith('__'):
+                continue
+            
+            print(f"[DASEIN][TOOL_PATCH]{indent}   Checking node: {parent_name}")
+            print(f"[DASEIN][TOOL_PATCH]{indent}     Node type: {type(parent_node).__name__}")
+            print(f"[DASEIN][TOOL_PATCH]{indent}     Has .data: {hasattr(parent_node, 'data')}")
+            if hasattr(parent_node, 'data'):
+                print(f"[DASEIN][TOOL_PATCH]{indent}     .data type: {type(parent_node.data).__name__}")
+                print(f"[DASEIN][TOOL_PATCH]{indent}     .data has .nodes: {hasattr(parent_node.data, 'nodes')}")
+            
+            # Check if this parent has a subgraph
+            if hasattr(parent_node, 'data') and hasattr(parent_node.data, 'nodes'):
+                print(f"[DASEIN][TOOL_PATCH]{indent}     Has subgraph!")
+                try:
+                    subgraph = parent_node.data.get_graph()
+                    sub_nodes = subgraph.nodes
+                    print(f"[DASEIN][TOOL_PATCH]{indent}     Subgraph nodes: {list(sub_nodes.keys())}")
+                    
+                    # Check if target node is in this subgraph
+                    if node_name in sub_nodes:
+                        print(f"[DASEIN][TOOL_PATCH]{indent}     ✓ Found '{node_name}' in subgraph!")
+                        target_node = sub_nodes[node_name]
+                        if hasattr(target_node, 'node'):
+                            actual_node = target_node.node
+                            tool_objects = self._extract_tools_from_node_object(actual_node)
+                            if tool_objects:
+                                return tool_objects
+                    
+                    # Not found here, recurse deeper into this subgraph
+                    print(f"[DASEIN][TOOL_PATCH]{indent}     Recursing into subgraph nodes...")
+                    tool_objects = self._search_node_recursively(node_name, sub_nodes, depth + 1)
+                    if tool_objects:
+                        return tool_objects
+                        
+                except Exception as e:
+                    print(f"[DASEIN][TOOL_PATCH]{indent}     Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"[DASEIN][TOOL_PATCH]{indent}     No subgraph")
+        
+        return tool_objects
+    
+    def _find_tool_objects_for_node(self, node_name: str):
+        """Find actual Python tool objects for a given node."""
+        tool_objects = []
+        
+        try:
+            if not hasattr(self._agent, 'get_graph'):
+                print(f"[DASEIN][TOOL_PATCH]   Agent has no get_graph method")
+                return tool_objects
+            
+            graph = self._agent.get_graph()
+            nodes = graph.nodes
+            node_names = list(nodes.keys())
+            print(f"[DASEIN][TOOL_PATCH]   Graph has {len(nodes)} nodes: {node_names}")
+            
+            # Check if node_name contains a dot (subgraph notation like "research_supervisor.ConductResearch")
+            if '.' in node_name:
+                print(f"[DASEIN][TOOL_PATCH]   Node is subgraph: {node_name}")
+                parent_name, sub_name = node_name.split('.', 1)
+                parent_node = nodes.get(parent_name)
+                
+                if parent_node and hasattr(parent_node, 'data'):
+                    print(f"[DASEIN][TOOL_PATCH]   Found parent node, getting subgraph...")
+                    subgraph = parent_node.data.get_graph()
+                    sub_nodes = subgraph.nodes
+                    print(f"[DASEIN][TOOL_PATCH]   Subgraph has {len(sub_nodes)} nodes")
+                    target_node = sub_nodes.get(sub_name)
+                    
+                    if target_node and hasattr(target_node, 'node'):
+                        print(f"[DASEIN][TOOL_PATCH]   Found target subnode, extracting tools...")
+                        actual_node = target_node.node
+                        tool_objects = self._extract_tools_from_node_object(actual_node)
+                    else:
+                        print(f"[DASEIN][TOOL_PATCH]   ⚠️  Subnode not found or has no .node attribute")
+                else:
+                    print(f"[DASEIN][TOOL_PATCH]   ⚠️  Parent node not found or has no .data attribute")
+            else:
+                # Top-level node
+                print(f"[DASEIN][TOOL_PATCH]   Node is top-level: {node_name}")
+                target_node = nodes.get(node_name)
+                
+                if target_node:
+                    print(f"[DASEIN][TOOL_PATCH]   Found node, checking for .node attribute...")
+                    if hasattr(target_node, 'node'):
+                        print(f"[DASEIN][TOOL_PATCH]   Has .node attribute, extracting tools...")
+                        actual_node = target_node.node
+                        tool_objects = self._extract_tools_from_node_object(actual_node)
+                    else:
+                        print(f"[DASEIN][TOOL_PATCH]   ⚠️  Node has no .node attribute")
+                else:
+                    # Not found as top-level, search in subgraphs
+                    print(f"[DASEIN][TOOL_PATCH]   ⚠️  Node '{node_name}' not found in top-level graph")
+                    print(f"[DASEIN][TOOL_PATCH]   Searching in subgraphs...")
+                    
+                    # Recursively search all subgraphs
+                    tool_objects = self._search_node_recursively(node_name, nodes)
+                    
+                    if not tool_objects:
+                        print(f"[DASEIN][TOOL_PATCH]   ⚠️  Node '{node_name}' not found in any subgraph")
+        
+        except Exception as e:
+            print(f"[DASEIN][TOOL_PATCH]   ❌ Exception while finding tools: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return tool_objects
+    
+    def _extract_tools_from_node_object(self, node_obj):
+        """Extract tool objects from a node object."""
+        tools = []
+        
+        print(f"[DASEIN][TOOL_PATCH]     Checking node_obj type: {type(node_obj).__name__}")
+        
+        # Check tools_by_name
+        if hasattr(node_obj, 'tools_by_name'):
+            print(f"[DASEIN][TOOL_PATCH]     ✓ Has tools_by_name with {len(node_obj.tools_by_name)} tools")
+            tools.extend(node_obj.tools_by_name.values())
+        else:
+            print(f"[DASEIN][TOOL_PATCH]     ✗ No tools_by_name")
+        
+        # Check runnable.tools
+        if hasattr(node_obj, 'runnable'):
+            print(f"[DASEIN][TOOL_PATCH]     ✓ Has runnable")
+            if hasattr(node_obj.runnable, 'tools'):
+                print(f"[DASEIN][TOOL_PATCH]       ✓ runnable.tools exists")
+                runnable_tools = node_obj.runnable.tools
+                if callable(runnable_tools):
+                    print(f"[DASEIN][TOOL_PATCH]       runnable.tools is callable, calling...")
+                    try:
+                        runnable_tools = runnable_tools()
+                        print(f"[DASEIN][TOOL_PATCH]       Got {len(runnable_tools) if isinstance(runnable_tools, list) else 1} tool(s)")
+                    except Exception as e:
+                        print(f"[DASEIN][TOOL_PATCH]       ❌ Failed to call: {e}")
+                if isinstance(runnable_tools, list):
+                    tools.extend(runnable_tools)
+                elif runnable_tools:
+                    tools.append(runnable_tools)
+            else:
+                print(f"[DASEIN][TOOL_PATCH]       ✗ No runnable.tools")
+        else:
+            print(f"[DASEIN][TOOL_PATCH]     ✗ No runnable")
+        
+        # Check bound.tools
+        if hasattr(node_obj, 'bound'):
+            print(f"[DASEIN][TOOL_PATCH]     ✓ Has bound")
+            if hasattr(node_obj.bound, 'tools'):
+                print(f"[DASEIN][TOOL_PATCH]       ✓ bound.tools exists")
+                bound_tools = node_obj.bound.tools
+                if isinstance(bound_tools, list):
+                    print(f"[DASEIN][TOOL_PATCH]       Got {len(bound_tools)} tool(s)")
+                    tools.extend(bound_tools)
+                elif bound_tools:
+                    print(f"[DASEIN][TOOL_PATCH]       Got 1 tool")
+                    tools.append(bound_tools)
+            else:
+                print(f"[DASEIN][TOOL_PATCH]       ✗ No bound.tools")
+        else:
+            print(f"[DASEIN][TOOL_PATCH]     ✗ No bound")
+        
+        # Check steps
+        if hasattr(node_obj, 'steps'):
+            print(f"[DASEIN][TOOL_PATCH]     ✓ Has steps ({len(node_obj.steps)})")
+            for i, step in enumerate(node_obj.steps):
+                if hasattr(step, 'tools_by_name'):
+                    print(f"[DASEIN][TOOL_PATCH]       ✓ Step {i} has tools_by_name with {len(step.tools_by_name)} tools")
+                    tools.extend(step.tools_by_name.values())
+                    break
+        else:
+            print(f"[DASEIN][TOOL_PATCH]     ✗ No steps")
+        
+        print(f"[DASEIN][TOOL_PATCH]     Total tools extracted: {len(tools)}")
+        
+        return tools
+    
     def on_llm_start(
         self,
         serialized: Dict[str, Any],
         prompts: List[str],
+        *,
+        run_id: str = None,
+        parent_run_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         """Called when an LLM starts running."""
         model_name = serialized.get("name", "unknown") if serialized else "unknown"
+        
+        # PIPECLEANER: Intercept Summary LLM calls
+        tools_in_call = None
+        if 'invocation_params' in kwargs:
+            tools_in_call = kwargs['invocation_params'].get('tools') or kwargs['invocation_params'].get('functions')
+        
+        if tools_in_call:
+            tool_names = [t.get('name') or t.get('function', {}).get('name', 'unknown') for t in tools_in_call]
+            
+            if 'Summary' in tool_names:
+                # NOTE: Deduplication now happens in the HOT PATH (monkey-patched LLM methods)
+                # This callback is just for tracking, not deduplication
+                pass
+                
+            if False and 'Summary' in tool_names:  # DISABLED: Deduplication moved to hotpath
+                # Check if run-scoped corpus is enabled (has filter search rules)
+                has_filter_rules = False
+                if hasattr(self, '_selected_rules'):
+                    from .pipecleaner import _find_filter_search_rules
+                    filter_rules = _find_filter_search_rules('summary', self._selected_rules)
+                    has_filter_rules = len(filter_rules) > 0
+                
+                if not has_filter_rules:
+                    # Silent fail - no corpus deduplication if no rules
+                    pass
+                else:
+                    # Only print when we actually have rules and will deduplicate
+                    print(f"[CORPUS] 📥 Summary LLM detected with {len(prompts)} prompts")
+                    # Re-entrancy guard: prevent nested calls from corrupting state
+                    from contextvars import ContextVar
+                    if not hasattr(DaseinCallbackHandler, '_in_corpus_processing'):
+                        DaseinCallbackHandler._in_corpus_processing = ContextVar('in_corpus', default=False)
+                        DaseinCallbackHandler._reentrancy_count = 0
+                    
+                    if DaseinCallbackHandler._in_corpus_processing.get():
+                        # Already processing corpus in this call stack, fail-open
+                        DaseinCallbackHandler._reentrancy_count += 1
+                        print(f"[CORPUS] ⚠️  Re-entrancy detected #{DaseinCallbackHandler._reentrancy_count}, skipping nested call")
+                        return
+                    
+                    # Set re-entrancy guard
+                    token = DaseinCallbackHandler._in_corpus_processing.set(True)
+                    
+                    try:
+                        # Get or create run-scoped corpus
+                        from .pipecleaner import get_or_create_corpus
+                        import threading
+                        corpus = get_or_create_corpus(self.run_id, verbose=self._verbose)
+                        
+                        # Module-level lock for atomic snapshot/swap (shared across all instances)
+                        if not hasattr(DaseinCallbackHandler, '_prompts_lock'):
+                            DaseinCallbackHandler._prompts_lock = threading.Lock()
+                        
+                        # STEP 1: Snapshot under lock (atomic read, NEVER iterate live dict)
+                        with DaseinCallbackHandler._prompts_lock:
+                            try:
+                                snapshot = tuple(prompts)  # Immutable snapshot, safe to iterate
+                            except RuntimeError:
+                                print(f"[CORPUS] ⚠️  Skipping (prompts being iterated)")
+                                return
+                    
+                        # STEP 2: Process outside lock (no contention)
+                        cleaned_prompts = []
+                        total_original_chars = 0
+                        total_cleaned_chars = 0
+                        total_original_tokens_est = 0
+                        total_cleaned_tokens_est = 0
+                        
+                        for i, prompt in enumerate(snapshot):
+                            prompt_str = str(prompt)
+                            
+                            # Skip if too short
+                            if len(prompt_str) < 2500:
+                                cleaned_prompts.append(prompt_str)
+                                continue
+                            
+                            # Track original
+                            original_chars = len(prompt_str)
+                            original_tokens_est = original_chars // 4  # Rough estimate: 4 chars/token
+                            total_original_chars += original_chars
+                            total_original_tokens_est += original_tokens_est
+                            
+                            # Split: first 2000 chars (system prompt) + rest (content to dedupe)
+                            system_part = prompt_str[:2000]
+                            content_part = prompt_str[2000:]
+                            
+                            # Generate unique prompt_id
+                            import hashlib
+                            prompt_id = f"p{i}_{hashlib.md5(content_part[:100].encode()).hexdigest()[:8]}"
+                            
+                            # Enqueue into corpus (barrier will handle batching, blocks until ready)
+                            # Call synchronous enqueue (will block until batch is processed, then released sequentially)
+                            deduplicated_content = corpus.enqueue_prompt(prompt_id, content_part)
+                            
+                            # Reassemble
+                            cleaned_prompt = system_part + deduplicated_content
+                            
+                            # Track cleaned
+                            cleaned_chars = len(cleaned_prompt)
+                            cleaned_tokens_est = cleaned_chars // 4
+                            total_cleaned_chars += cleaned_chars
+                            total_cleaned_tokens_est += cleaned_tokens_est
+                            
+                            reduction_pct = 100*(original_chars-cleaned_chars)//original_chars if original_chars > 0 else 0
+                            # Always show reduction results (key metric)
+                            print(f"[🧹 CORPUS] Prompt {prompt_id}: {original_chars} → {cleaned_chars} chars ({reduction_pct}% saved)")
+                            cleaned_prompts.append(cleaned_prompt)
+                        
+                        # Store token delta for later adjustment in on_llm_end
+                        if total_original_tokens_est > 0:
+                            tokens_saved = total_original_tokens_est - total_cleaned_tokens_est
+                            if not hasattr(self, '_corpus_token_savings'):
+                                self._corpus_token_savings = {}
+                            self._corpus_token_savings[run_id] = tokens_saved
+                            print(f"[🔬 TOKEN TRACKING] Pre-prune: {total_original_chars} chars (~{total_original_tokens_est} tokens)")
+                            print(f"[🔬 TOKEN TRACKING] Post-prune: {total_cleaned_chars} chars (~{total_cleaned_tokens_est} tokens)")
+                            print(f"[🔬 TOKEN TRACKING] Estimated savings: ~{tokens_saved} tokens ({100*tokens_saved//total_original_tokens_est if total_original_tokens_est > 0 else 0}%)")
+                            print(f"[🔬 TOKEN TRACKING] Stored savings for run_id={str(run_id)[:8]} to adjust on_llm_end")
+                        
+                        # STEP 3: Atomic swap under lock (copy-on-write, no in-place mutation)
+                        print(f"[🔬 CORPUS DEBUG] About to swap prompts - have {len(cleaned_prompts)} cleaned prompts")
+                        with DaseinCallbackHandler._prompts_lock:
+                            try:
+                                print(f"[🔬 CORPUS DEBUG] Inside lock, swapping...")
+                                # Atomic slice assignment (replaces entire contents in one operation)
+                                prompts[:] = cleaned_prompts
+                                # CRITICAL: Update _last_modified_prompts so DaseinLLMWrapper sees deduplicated prompts
+                                self._last_modified_prompts = cleaned_prompts
+                                print(f"[🔬 CORPUS] ✅ Updated _last_modified_prompts with {len(cleaned_prompts)} deduplicated prompts")
+                            except RuntimeError as e:
+                                print(f"[CORPUS] ⚠️  Could not swap prompts (framework collision): {e}")
+                            except Exception as e:
+                                print(f"[CORPUS] ⚠️  Unexpected error swapping: {e}")
+                                import traceback
+                                traceback.print_exc()
+                    finally:
+                        # Always reset re-entrancy guard
+                        DaseinCallbackHandler._in_corpus_processing.reset(token)
+        
+        # DEBUG: Print run context
+        # print(f"🔧 [LLM_START DEBUG] run_id: {run_id}, parent: {parent_run_id}")
         
         # 🎯 CRITICAL: Track current node from kwargs metadata FIRST (needed for tool extraction)
         if self._is_langgraph and 'metadata' in kwargs and isinstance(kwargs['metadata'], dict):
@@ -432,6 +889,15 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             
             if tools_in_call:
                 node_name = self._current_chain_node or 'unknown'
+                
+                # Extract tool names from the schemas
+                tool_names = []
+                for tool in tools_in_call:
+                    name = tool.get('name') or tool.get('function', {}).get('name', 'unknown')
+                    tool_names.append(name)
+                
+                # print(f"🔧 [TOOLS DETECTED] Node '{node_name}' has {len(tool_names)} tools: {tool_names}")  # Commented out - too noisy
+                
                 # Check if we've already extracted tools for this node
                 existing_nodes = {t.get('node') for t in self._compiled_tools_metadata}
                 if node_name not in existing_nodes:
@@ -453,14 +919,21 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                                 tool_meta['args_schema'] = {}
                             
                             self._compiled_tools_metadata.append(tool_meta)
-                    except Exception:
+                        
+                        # print(f"🔧 [TOOLS METADATA] Extracted metadata for {len(tool_names)} tools from node '{node_name}'")  # Commented out - too noisy
+                    except Exception as e:
+                        print(f"🔧 [TOOLS ERROR] Failed to extract metadata: {e}")
                         pass  # Silently fail
+                # else:
+                    # print(f"🔧 [TOOLS SKIP] Already extracted tools for node '{node_name}'")  # Commented out - too noisy
         
         # Inject rules if applicable
         modified_prompts = self._inject_rule_if_applicable("llm_start", model_name, prompts)
         
         # Store the modified prompts for the LLM wrapper to use
         self._last_modified_prompts = modified_prompts
+        
+        # Note: Pipecleaner deduplication now happens at ToolExecutor level (see wrappers.py)
         
         # 🚨 OPTIMIZED: For LangGraph, check if kwargs contains 'invocation_params' with messages
         # Extract the most recent message instead of full history
@@ -558,12 +1031,21 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             # Debug: Warn if still empty
             if not outcome or len(outcome) == 0:
                 self._vprint(f"[DASEIN][CALLBACK] WARNING: on_llm_end got empty outcome!")
-                print(f"  Response: {str(response)[:200]}")
+                print(f"  Response: {str(response)[:1000]}")
                 print(f"  kwargs keys: {list(kwargs.keys())}")
                 
         except (AttributeError, IndexError, TypeError) as e:
             self._vprint(f"[DASEIN][CALLBACK] Error in on_llm_end: {e}")
             outcome = self._excerpt(str(response))
+        
+        # # 🎯 PRINT FULL LLM OUTPUT (RAW, UNTRUNCATED) - COMMENTED OUT FOR TESTING
+        # node_name = getattr(self, '_current_chain_node', 'agent')
+        # run_number = getattr(self, '_run_number', 1)
+        # print(f"\n{'='*80}")
+        # print(f"[DASEIN][LLM_END] RUN {run_number} | Node: {node_name}")
+        # print(f"{'='*80}")
+        # print(f"FULL OUTPUT:\n{str(response)}")
+        # print(f"{'='*80}\n")
         
         # 🎯 CRITICAL: Extract function calls for state tracking (agent-agnostic)
         try:
@@ -600,6 +1082,9 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                             self._function_calls_made[func_name] = []
                         self._function_calls_made[func_name].append(call_info)
                         
+                        # 🔥 HOTPATH: Set current tool name for next LLM call (which will be inside the tool)
+                        self._current_tool_name = func_name
+                        
                         self._vprint(f"[DASEIN][STATE] Tracked function call: {func_name} (count: {len(self._function_calls_made[func_name])})")
         except Exception as e:
             pass  # Silently skip if function call extraction fails
@@ -608,18 +1093,6 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         input_tokens = 0
         output_tokens = 0
         try:
-            # DEBUG: Print response structure for first LLM call
-            # Uncomment to see token structure:
-            # import json
-            # print(f"[DEBUG] Response structure:")
-            # print(f"  Has llm_output: {hasattr(response, 'llm_output')}")
-            # if hasattr(response, 'llm_output'):
-            #     print(f"  llm_output keys: {response.llm_output.keys() if response.llm_output else None}")
-            # print(f"  Has generations: {hasattr(response, 'generations')}")
-            # if hasattr(response, 'generations') and response.generations:
-            #     gen = response.generations[0][0] if isinstance(response.generations[0], list) else response.generations[0]
-            #     print(f"  generation_info: {gen.generation_info if hasattr(gen, 'generation_info') else None}")
-            
             # Try LangChain's standard llm_output field
             if hasattr(response, 'llm_output') and response.llm_output:
                 llm_output = response.llm_output
@@ -633,7 +1106,6 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                     input_tokens = usage.get('input_tokens', 0) or usage.get('prompt_tokens', 0)
                     output_tokens = usage.get('output_tokens', 0) or usage.get('completion_tokens', 0)
             
-            # Try generations metadata (Google GenAI format)
             if (input_tokens == 0 and output_tokens == 0) and hasattr(response, 'generations') and response.generations:
                 first_gen = response.generations[0]
                 if isinstance(first_gen, list) and len(first_gen) > 0:
@@ -654,6 +1126,18 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                         usage = gen_info['usage_metadata']
                         input_tokens = usage.get('prompt_token_count', 0) or usage.get('input_tokens', 0)
                         output_tokens = usage.get('candidates_token_count', 0) or usage.get('output_tokens', 0)
+            
+            # Check if we have stored savings from corpus deduplication and adjust tokens
+            current_run_id = kwargs.get('run_id', None)
+            if current_run_id and hasattr(self, '_corpus_token_savings') and current_run_id in self._corpus_token_savings:
+                tokens_saved = self._corpus_token_savings[current_run_id]
+                # Adjust input tokens to reflect deduplication savings
+                if input_tokens > 0:
+                    # If provider count is much larger than saved estimate, LLM saw original prompts
+                    if abs(input_tokens - tokens_saved) >= input_tokens * 0.3:
+                        input_tokens = max(0, input_tokens - tokens_saved)
+                # Clean up
+                del self._corpus_token_savings[current_run_id]
             
             # Log if we got tokens
             # if input_tokens > 0 or output_tokens > 0:
@@ -762,6 +1246,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         This is where we detect and track dynamic tools that weren't
         statically attached to the agent at init time.
         """
+        import time
         tool_name = serialized.get("name", "unknown") if serialized else "unknown"
         
         # Track discovered tools for reporting
@@ -771,6 +1256,9 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         
         # Store tool name for later use in on_tool_end
         self._tool_name_by_run_id[run_id] = tool_name
+        
+        # 🔥 HOTPATH: Track current tool for pipecleaner deduplication
+        self._current_tool_name = tool_name
         
         # Apply tool-level rule injection
         # self._vprint(f"[DASEIN][CALLBACK] on_tool_start called!")  # Commented out - too noisy
@@ -824,13 +1312,17 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         parent_run_id: Optional[str] = None,
         tags: Optional[List[str]] = None,
         **kwargs: Any,
-    ) -> None:
+    ) -> Any:
         """Called when a tool ends running."""
+        import time
         # Get the tool name from the corresponding tool_start
         tool_name = self._tool_name_by_run_id.get(run_id, "unknown")
         
         # Handle different output types (LangGraph may pass ToolMessage objects)
         output_str = str(output)
+        
+        # Note: Pipecleaner deduplication happens at ToolExecutor level (see wrappers.py)
+        
         outcome = self._excerpt(output_str)
         
         # self._vprint(f"[DASEIN][CALLBACK] on_tool_end called!")  # Commented out - too noisy
@@ -894,6 +1386,9 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         # Clean up the stored tool name
         if run_id in self._tool_name_by_run_id:
             del self._tool_name_by_run_id[run_id]
+        
+        # 🔥 HOTPATH: Clear current tool
+        self._current_tool_name = None
     
     def on_tool_error(
         self,
@@ -938,10 +1433,13 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             if 'metadata' in kwargs and isinstance(kwargs['metadata'], dict):
                 if 'langgraph_node' in kwargs['metadata']:
                     self._current_chain_node = kwargs['metadata']['langgraph_node']
+                    # print(f"🔵 [NODE EXEC] {self._current_chain_node}")  # Commented out - too noisy
                 else:
                     self._current_chain_node = chain_name
+                    # print(f"🔵 [NODE EXEC] {chain_name}")  # Commented out - too noisy
             else:
                 self._current_chain_node = chain_name
+                # print(f"🔵 [NODE EXEC] {chain_name}")  # Commented out - too noisy
             
             # self._vprint(f"[DASEIN][CALLBACK] Suppressing redundant chain_start for LangGraph agent")  # Commented out - too noisy
             # Still handle tool executors
@@ -1227,6 +1725,7 @@ TURN 2+ (After ACK):
     
     def _inject_rule_if_applicable(self, step_type: str, tool_name: str, prompts: List[str]) -> List[str]:
         """Inject rules into prompts if applicable."""
+        
         if not self._should_inject_rule(step_type, tool_name):
             return prompts
 

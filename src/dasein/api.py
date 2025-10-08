@@ -19,6 +19,15 @@ from .config import W_COST
 
 
 # ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Microturn enforcement configuration
+USE_LLM_MICROTURN = False  # If True, use LLM to judge which calls to allow
+                           # If False, use deterministic duplicate detection only
+                           # (Keep False - LLM microturn adds latency, use only for semantic rules)
+
+# ============================================================================
 # VERBOSE LOGGING HELPER
 # ============================================================================
 
@@ -51,6 +60,7 @@ class DaseinLLMWrapper(BaseChatModel):
     
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         """Generate response and capture trace."""
+        print(f"[DASEIN][WRAPPER] _generate called with {len(messages)} messages")
         self._vprint(f"[DASEIN][TRACE] LLM wrapper _generate called with {len(messages)} messages")
         
         # Get model name dynamically
@@ -163,6 +173,89 @@ class DaseinLLMWrapper(BaseChatModel):
         self._vprint(f"[DASEIN][TRACE] LLM result: {result_text[:100]}...")
         self._vprint(f"[DASEIN][METRICS] Tokens: {step['tokens_input']}->{output_tokens} | Time: {duration_ms}ms | Success: {'OK' if success else 'FAIL'}")
         
+        # 🚨 MICROTURN ENFORCEMENT - RUN 1 ONLY
+        run_number = getattr(self._callback_handler, '_run_number', 1) if self._callback_handler else 1
+        print(f"[DASEIN][MICROTURN_DEBUG] run_number={run_number}, callback_handler={self._callback_handler is not None}")
+        if run_number == 1 and self._callback_handler:
+            try:
+                proposed_func_name = None
+                print(f"[DASEIN][MICROTURN_DEBUG] Checking result for function call...")
+                if hasattr(result, 'generations') and result.generations:
+                    first_gen = result.generations[0]
+                    if isinstance(first_gen, list) and len(first_gen) > 0:
+                        generation = first_gen[0]
+                    else:
+                        generation = first_gen
+                    
+                    print(f"[DASEIN][MICROTURN_DEBUG] generation type: {type(generation)}")
+                    if hasattr(generation, 'message') and hasattr(generation.message, 'additional_kwargs'):
+                        func_call = generation.message.additional_kwargs.get('function_call')
+                        print(f"[DASEIN][MICROTURN_DEBUG] func_call: {func_call}")
+                        if func_call and isinstance(func_call, dict) and 'name' in func_call:
+                            proposed_func_name = func_call['name']
+                else:
+                    print(f"[DASEIN][MICROTURN_DEBUG] No generations in result")
+                
+                if not proposed_func_name:
+                    print(f"[DASEIN][MICROTURN_DEBUG] No function call in response, skipping microturn")
+                else:
+                    print(f"[DASEIN][MICROTURN_DEBUG] Found proposed function: {proposed_func_name}")
+                    
+                    # Build execution state (BEFORE adding current call)
+                    state_lines = []
+                    if hasattr(self._callback_handler, '_function_calls_made') and self._callback_handler._function_calls_made:
+                        for fname in sorted(self._callback_handler._function_calls_made.keys()):
+                            count = len(self._callback_handler._function_calls_made[fname])
+                            if count > 0:
+                                state_lines.append(f"  • {fname}: called {count}x")
+                    
+                    state_context = "EXECUTION STATE:\n" + "\n".join(state_lines) if state_lines else "EXECUTION STATE: No calls yet"
+                    
+                    microturn_prompt = f"""You are a rule enforcement system. Your job is to decide if a proposed action violates the rules.
+
+HARD RULE: You MUST make at maximum a single summary call
+
+{state_context}
+
+PROPOSED ACTION: Call {proposed_func_name}
+
+DECISION:
+If this action violates the rule, respond with EXACTLY: BLOCK
+If this action is allowed, respond with EXACTLY: PASS
+
+Your response (BLOCK or PASS):"""
+                    
+                    print(f"[DASEIN][MICROTURN_DEBUG] Calling microturn LLM...")
+                    from langchain_core.messages import HumanMessage
+                    messages_for_microturn = [HumanMessage(content=microturn_prompt)]
+                    microturn_response = self._llm.invoke(messages_for_microturn)
+                    
+                    if hasattr(microturn_response, 'content'):
+                        decision = microturn_response.content.strip().upper()
+                    else:
+                        decision = str(microturn_response).strip().upper()
+                    
+                    node_name = getattr(self._callback_handler, '_current_chain_node', 'agent')
+                    print(f"[DASEIN][MICROTURN] Node: {node_name} | Proposed: {proposed_func_name} | Decision: {decision}")
+                    
+                    if "BLOCK" in decision:
+                        print(f"[DASEIN][MICROTURN] BLOCKING {proposed_func_name} call!")
+                        # Modify the result to clear the function call
+                        if hasattr(result, 'generations') and result.generations:
+                            first_gen = result.generations[0]
+                            if isinstance(first_gen, list) and len(first_gen) > 0:
+                                generation = first_gen[0]
+                            else:
+                                generation = first_gen
+                            
+                            if hasattr(generation, 'message'):
+                                generation.message.additional_kwargs['function_call'] = {}
+                                generation.message.content = ""
+            except Exception as e:
+                print(f"[DASEIN][MICROTURN] Error in microturn: {e}")
+                import traceback
+                traceback.print_exc()
+        
         # Trigger on_llm_end callback
         if self._callback_handler:
             self._callback_handler.on_llm_end(
@@ -216,6 +309,15 @@ class DaseinLLMWrapper(BaseChatModel):
             return text
         except:
             return "No result"
+    
+    def invoke(self, messages, **kwargs):
+        """Override invoke to intercept all LLM calls."""
+        print(f"[DASEIN][WRAPPER] invoke() called with {len(messages) if isinstance(messages, list) else 1} messages")
+        
+        # Call the parent's invoke which will call our _generate
+        result = super().invoke(messages, **kwargs)
+        
+        return result
     
     def _llm_type(self):
         return "dasein_llm_wrapper"
@@ -783,10 +885,43 @@ class CognateProxy:
         
         # Wrap the agent's LLM with our trace capture wrapper
         self._wrap_agent_llm()
+        
+        # Wrap the agent's tools for pipecleaner deduplication
+        print(f"\n{'='*70}")
+        print(f"[DASEIN] Patching tool execution for pipecleaner...")
+        print(f"{'='*70}")
+        try:
+            from .wrappers import wrap_tools_for_pipecleaner
+            verbose = getattr(self._callback_handler, '_verbose', False)
+            success = wrap_tools_for_pipecleaner(self._agent, self._callback_handler, verbose=verbose)
+            if success:
+                print(f"[DASEIN] ✅ Tool execution patched successfully")
+            else:
+                print(f"[DASEIN] ⚠️  Tool execution patching failed")
+            print(f"{'='*70}\n")
+        except Exception as e:
+            print(f"[DASEIN] ❌ ERROR patching tool execution: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"{'='*70}\n")
+        
+        # Inject universal dead-letter tool
+        self._inject_deadletter_tool()
     
     def _vprint(self, message: str, force: bool = False):
         """Helper for verbose printing."""
         _vprint(message, self._verbose, force)
+    
+    def _format_final_outcome(self, outcome):
+        """Format final outcome for display."""
+        if outcome == "completed":
+            return "✅ Task Completed"
+        elif outcome == "gave_up":
+            return "⚠️ Agent Gave Up"
+        elif outcome == "failed":
+            return "❌ Failed"
+        else:
+            return f"❓ {outcome}"
         
     def _extract_query_from_input(self, input_data):
         """ CRITICAL: Extract query string from various input formats."""
@@ -1466,23 +1601,704 @@ Follow these rules when planning your actions."""
             traceback.print_exc()
             return False
     
-    def _wrap_agent_llm(self):
-        """Dynamically find and wrap any LLM in the agent structure."""
-        try:
-            # Recursively search for any LLM-like object in the agent structure
-            llm = self._find_llm_recursively(self._agent, max_depth=5)
-            if llm:
-                wrapped_llm = DaseinLLMWrapper(llm, self._callback_handler)
-                # Replace the original LLM with our wrapped version
-                self._replace_llm_in_structure(self._agent, llm, wrapped_llm, max_depth=5)
-                self._wrapped_llm = wrapped_llm
-                self._vprint(f"[DASEIN][WRAPPER] Successfully wrapped {type(llm).__name__} LLM")
-                return
+    @staticmethod
+    def _create_deadletter_tool():
+        """Create the universal dead-letter tool for blocked calls.
+        
+        This tool acts as a sink for calls blocked by anti-fanout rules.
+        It returns instantly with structured metadata, allowing nodes to complete normally.
+        """
+        def dasein_deadletter(
+            original_tool: str,
+            original_args_fingerprint: str,
+            reason_code: str,
+            policy_trace_id: str,
+            tokens_saved_estimate: int = 0,
+            cached_result: Any = None
+        ) -> Any:
+            """Universal dead-letter tool for blocked policy calls.
             
-            self._vprint(f"[DASEIN][WRAPPER] Could not find any LLM in agent structure")
-            self._wrapped_llm = None
+            **INTERNAL USE ONLY - DO NOT CALL DIRECTLY**
+            
+            This tool is automatically invoked when Dasein blocks a call for policy reasons
+            (e.g., anti-fanout rules). Supports transparent deduplication by returning
+            cached results from previous identical calls.
+            
+            Args:
+                original_tool: Name of the tool that was blocked
+                original_args_fingerprint: Hash/summary of original arguments
+                reason_code: Why the call was blocked (e.g., "duplicate_detected")
+                policy_trace_id: Trace ID for the rule that caused the block
+                tokens_saved_estimate: Estimated tokens saved by blocking this call
+                cached_result: If provided, return this (transparent deduplication)
+            
+            Returns:
+                Either cached_result (transparent) or structured error dict (explicit block)
+            """
+            import time
+            
+            if cached_result is not None:
+                # Transparent deduplication - return the original result seamlessly
+                print(f"[DASEIN][DEADLETTER] 🔄 Transparent dedup: {original_tool} (returning cached result, {tokens_saved_estimate} tokens saved)")
+                return cached_result
+            else:
+                # Explicit block - return error structure
+                result = {
+                    "blocked_by_policy": True,
+                    "original_tool": original_tool,
+                    "original_args_fingerprint": original_args_fingerprint,
+                    "reason_code": reason_code,
+                    "policy_trace_id": policy_trace_id,
+                    "tokens_saved_estimate": tokens_saved_estimate,
+                    "timestamp": time.time(),
+                    "message": f"Call to {original_tool} was blocked by Dasein policy: {reason_code}"
+                }
+                print(f"[DASEIN][DEADLETTER] 🚫 Blocked {original_tool}: {reason_code} (est. {tokens_saved_estimate} tokens saved)")
+                return result
+        
+        return dasein_deadletter
+    
+    def _inject_deadletter_tool(self):
+        """Inject the dead-letter tool into the agent's tool registry.
+        
+        The tool is added to the executor but hidden from the LLM's view by marking it internal.
+        """
+        try:
+            deadletter_fn = self._create_deadletter_tool()
+            
+            # Convert to LangChain Tool
+            from langchain.tools import Tool
+            deadletter_tool = Tool(
+                name="dasein_deadletter",
+                description="**INTERNAL USE ONLY - DO NOT CALL DIRECTLY**\nThis tool is automatically invoked when Dasein blocks a call for policy reasons.",
+                func=deadletter_fn
+            )
+            
+            # For LangGraph agents: Add to tools list in langgraph_params
+            if self._is_langgraph and self._langgraph_params and 'tools' in self._langgraph_params:
+                self._langgraph_params['tools'].append(deadletter_tool)
+                print(f"[DASEIN][DEADLETTER] Injected dead-letter tool into LangGraph params")
+            
+            # For LangChain agents: Add to agent's tools attribute if accessible
+            elif hasattr(self._agent, 'tools'):
+                if isinstance(self._agent.tools, list):
+                    self._agent.tools.append(deadletter_tool)
+                    print(f"[DASEIN][DEADLETTER] Injected dead-letter tool into LangChain agent")
+            
+            # Store reference for later use
+            self._deadletter_tool = deadletter_tool
+            self._deadletter_fn = deadletter_fn
+            
         except Exception as e:
-            self._vprint(f"[DASEIN][WRAPPER] Failed to wrap agent LLM: {e}")
+            print(f"[DASEIN][DEADLETTER] Failed to inject dead-letter tool: {e}")
+            import traceback
+            traceback.print_exc()
+            self._deadletter_tool = None
+            self._deadletter_fn = None
+    
+    def _wrap_agent_llm(self):
+        """Monkey-patch ALL LLM classes found in agent + tools."""
+        try:
+            # Find ALL LLMs in agent structure + tools
+            print(f"[DASEIN][WRAPPER] Searching for ALL LLMs in agent+tools...")
+            all_llms = []
+            
+            # 1. Search in agent
+            agent_llm = self._find_llm_recursively(self._agent, max_depth=5)
+            if agent_llm:
+                all_llms.append(('agent', agent_llm))
+            
+            # 2. Search in tools (where Summary LLM lives!)
+            if hasattr(self._agent, 'tools'):
+                for i, tool in enumerate(self._agent.tools or []):
+                    tool_llm = self._find_llm_recursively(tool, max_depth=3, path=f"tools[{i}]")
+                    if tool_llm:
+                        all_llms.append((f'tool_{i}_{getattr(tool, "name", "unknown")}', tool_llm))
+            
+            print(f"[DASEIN][WRAPPER] Found {len(all_llms)} LLM(s)")
+            for location, llm in all_llms:
+                print(f"[DASEIN][WRAPPER]   - {location}: {type(llm).__name__}")
+            
+            # Patch all unique LLM classes
+            patched_classes = set()
+            for location, llm in all_llms:
+                llm_class = type(llm)
+                if llm_class in patched_classes:
+                    print(f"[DASEIN][WRAPPER] {llm_class.__name__} already patched for {location}, skipping")
+                    continue
+                    
+                print(f"[DASEIN][WRAPPER] Patching {llm_class.__name__} (found in {location})...")
+                
+                # Check what methods the LLM class has
+                # Only patch TOP-LEVEL methods to avoid double-deduplication from internal calls
+                print(f"[DASEIN][WRAPPER] Checking LLM methods...")
+                methods_to_patch = []
+                for method in ['invoke', 'ainvoke']:  # Only patch user-facing methods, not internal _generate
+                    if hasattr(llm_class, method):
+                        print(f"[DASEIN][WRAPPER]   - Has {method}")
+                        methods_to_patch.append(method)
+                
+                if not methods_to_patch:
+                    print(f"[DASEIN][WRAPPER] No methods to patch found!")
+                    return
+                
+                # Check if we already patched this class
+                first_method = getattr(llm_class, methods_to_patch[0])
+                if hasattr(first_method, '_dasein_patched'):
+                    print(f"[DASEIN][WRAPPER] {llm_class.__name__} already patched, skipping")
+                    return
+                    
+                callback_handler = self._callback_handler
+                
+                # Thread-local to track depth and max depth reached
+                import threading
+                _patch_depth = threading.local()
+                
+                def get_max_depth():
+                    return getattr(_patch_depth, 'max_depth', 0)
+                
+                def set_max_depth(val):
+                    _patch_depth.max_depth = val
+                
+                def is_in_microturn():
+                    return getattr(_patch_depth, 'in_microturn', False)
+                
+                def set_in_microturn(val):
+                    _patch_depth.in_microturn = val
+                
+                # Thread-local state tracking for Summary calls (mirrors callback pattern)
+                def get_summary_calls_made():
+                    """Get count of Summary calls made in this run."""
+                    return getattr(_patch_depth, 'summary_calls_made', 0)
+                
+                def increment_summary_calls():
+                    """Increment Summary call counter."""
+                    current = getattr(_patch_depth, 'summary_calls_made', 0)
+                    _patch_depth.summary_calls_made = current + 1
+                    return _patch_depth.summary_calls_made
+                
+                # Patch ALL methods (silent)
+                for method_name in methods_to_patch:
+                    original_method = getattr(llm_class, method_name)
+                    is_async = 'a' in method_name and (method_name.startswith('a') or method_name.startswith('_a'))
+                    
+                    # Use a factory function to properly capture the closure variables
+                    def make_patched_method(orig_method, meth_name, is_async_method, depth_tracker, max_depth_getter, max_depth_setter, in_microturn_getter, in_microturn_setter, get_summary_calls, increment_summary):
+                        if is_async_method:
+                            async def patched_method(self_llm, *args, **kwargs):
+                                # Track depth to find the leaf method
+                                depth = getattr(depth_tracker, 'value', 0)
+                                is_entry_point = (depth == 0)
+                                depth_tracker.value = depth + 1
+                                current_depth = depth_tracker.value
+                                
+                                # Track max depth reached (silent)
+                                if is_entry_point:
+                                    max_depth_setter(current_depth)
+                                else:
+                                    if current_depth > max_depth_getter():
+                                        max_depth_setter(current_depth)
+                                
+                                # 🔥 PIPECLEANER DEDUPLICATION (only patching top-level methods, always apply)
+                                # Skip depth checks - they don't work with async/parallel execution
+                                if callback_handler:
+                                    try:
+                                        # Extract messages from args based on method signature
+                                        messages_to_dedupe = None
+                                        arg_index = 0
+                                        
+                                        if meth_name in ['invoke', 'ainvoke']:
+                                            # First arg is 'input' (can be string, list, or PromptValue)
+                                            messages_to_dedupe = args[0] if args else kwargs.get('input', kwargs.get('messages'))
+                                            arg_index = 0
+                                        elif meth_name in ['_generate', '_agenerate']:
+                                            # First arg is 'messages' (list of BaseMessage)
+                                            messages_to_dedupe = args[0] if args else kwargs.get('messages')
+                                            arg_index = 0
+                                        elif meth_name in ['generate', 'agenerate']:
+                                            # First arg is 'prompts' (list of message lists)
+                                            messages_to_dedupe = args[0] if args else kwargs.get('prompts')
+                                            arg_index = 0
+                                        
+                                        # Convert to strings for deduplication
+                                        if messages_to_dedupe:
+                                            prompt_strings = []
+                                            for msg in (messages_to_dedupe if isinstance(messages_to_dedupe, list) else [messages_to_dedupe]):
+                                                if hasattr(msg, 'content'):
+                                                    prompt_strings.append(msg.content)
+                                                elif isinstance(msg, str):
+                                                    prompt_strings.append(msg)
+                                                else:
+                                                    prompt_strings.append(str(msg))
+                                            
+                                            # =============================================================
+                                            # HOTPATH DEBUGGING (commented out for production)
+                                            # =============================================================
+                                            # print(f"\n{'='*70}")
+                                            # print(f"[🔥 HOTPATH FULL DEBUG] {meth_name}() call")
+                                            # print(f"{'='*70}")
+                                            # 
+                                            # # 1. Callback state
+                                            # current_node = getattr(callback_handler, '_current_chain_node', None)
+                                            # current_tool = getattr(callback_handler, '_current_tool_name', None)
+                                            # print(f"[🔥] Current node: {current_node}")
+                                            # print(f"[🔥] Current tool: {current_tool}")
+                                            # 
+                                            # # 2. Tools in this call
+                                            # tools_in_call = []
+                                            # if 'invocation_params' in kwargs:
+                                            #     tools = kwargs['invocation_params'].get('tools') or kwargs['invocation_params'].get('functions') or []
+                                            #     tools_in_call = [t.get('name', t.get('function', {}).get('name', '?')) for t in tools]
+                                            # elif 'tools' in kwargs:
+                                            #     tools_in_call = [t.get('name', '?') for t in kwargs.get('tools', [])]
+                                            # elif 'functions' in kwargs:
+                                            #     tools_in_call = [t.get('name', '?') for t in kwargs.get('functions', [])]
+                                            # print(f"[🔥] Tools in call: {tools_in_call if tools_in_call else 'NONE'}")
+                                            # 
+                                            # # 3. Prompt characteristics
+                                            # prompt_lens = [len(s) for s in prompt_strings]
+                                            # print(f"[🔥] Prompt count: {len(prompt_strings)}")
+                                            # print(f"[🔥] Prompt lengths: {prompt_lens}")
+                                            # 
+                                            # # 4. Kwargs keys (for debugging)
+                                            # print(f"[🔥] Kwargs keys: {list(kwargs.keys())}")
+                                            # 
+                                            # # 5. Messages structure
+                                            # if messages_to_dedupe:
+                                            #     if isinstance(messages_to_dedupe, list):
+                                            #         msg_types = [type(m).__name__ for m in messages_to_dedupe[:3]]
+                                            #         print(f"[🔥] Message types (first 3): {msg_types}")
+                                            #     else:
+                                            #         print(f"[🔥] Messages type: {type(messages_to_dedupe).__name__}")
+                                            # 
+                                            # print(f"{'='*70}\n")
+                                            # 
+                                            # # Show first 200 chars to see the fingerprint
+                                            # if prompt_strings:
+                                            #     first_200 = prompt_strings[0][:200] if len(prompt_strings[0]) > 200 else prompt_strings[0]
+                                            #     print(f"[🔥] Prompt start (200 chars): {first_200}")
+                                            
+                                            # =============================================================
+                                            # Extract tools from LLM call kwargs (for filter_search rules)
+                                            # =============================================================
+                                            tools_in_this_call = []
+                                            
+                                            # Extract tool names from kwargs (handles multiple LLM providers' formats)
+                                            # Pattern 1: invocation_params (some providers)
+                                            if 'invocation_params' in kwargs:
+                                                inv_params = kwargs['invocation_params']
+                                                tools_param = inv_params.get('tools') or inv_params.get('functions') or []
+                                                for t in tools_param:
+                                                    if isinstance(t, dict):
+                                                        # Try: t['name'] or t['function']['name']
+                                                        name = t.get('name') or (t.get('function', {}).get('name') if isinstance(t.get('function'), dict) else None)
+                                                        if name:
+                                                            tools_in_this_call.append(name)
+                                            # Pattern 2: Direct 'tools' key (common)
+                                            elif 'tools' in kwargs:
+                                                tools_param = kwargs.get('tools', [])
+                                                for t in tools_param:
+                                                    if isinstance(t, dict):
+                                                        # Try: t['name'] or t['function']['name']
+                                                        name = t.get('name') or (t.get('function', {}).get('name') if isinstance(t.get('function'), dict) else None)
+                                                        if name:
+                                                            tools_in_this_call.append(name)
+                                            # Pattern 3: 'functions' key (OpenAI function calling)
+                                            elif 'functions' in kwargs:
+                                                funcs_param = kwargs.get('functions', [])
+                                                for t in funcs_param:
+                                                    if isinstance(t, dict):
+                                                        name = t.get('name')
+                                                        if name:
+                                                            tools_in_this_call.append(name)
+                                            
+                                            # Check if any filter_search rules match the tools in this LLM call
+                                            from .pipecleaner import _find_filter_search_rules
+                                            filter_rules = None
+                                            should_dedupe = False
+                                            
+                                            if hasattr(callback_handler, '_selected_rules') and prompt_strings and tools_in_this_call:
+                                                # Get all filter_search rules (they specify which tools to target via references.tools)
+                                                filter_rules = _find_filter_search_rules('*', callback_handler._selected_rules)
+                                                
+                                                # Check if any tool in this call matches rule's target tools
+                                                if filter_rules:
+                                                    for rule in filter_rules:
+                                                        # Handle both dict and object formats
+                                                        if isinstance(rule, dict):
+                                                            references = rule.get('references', {})
+                                                            rule_tools = references.get('tools', []) if isinstance(references, dict) else []
+                                                        else:
+                                                            references = getattr(rule, 'references', None)
+                                                            # references might be a dict or object, handle both
+                                                            if isinstance(references, dict):
+                                                                rule_tools = references.get('tools', [])
+                                                            elif references:
+                                                                rule_tools = getattr(references, 'tools', [])
+                                                            else:
+                                                                rule_tools = []
+                                                        
+                                                        for tool_in_call in tools_in_this_call:
+                                                            if tool_in_call.lower() in [rt.lower() for rt in rule_tools]:
+                                                                should_dedupe = True
+                                                                break
+                                                        if should_dedupe:
+                                                            break
+                                            
+                                            if should_dedupe:
+                                                    # Deduplicate each prompt
+                                                    from .pipecleaner import get_or_create_corpus
+                                                    import hashlib
+                                                    corpus = get_or_create_corpus(callback_handler.run_id, verbose=callback_handler._verbose)
+                                                    
+                                                    deduplicated_strings = []
+                                                    for i, prompt_str in enumerate(prompt_strings):
+                                                        if len(prompt_str) < 2500:
+                                                            deduplicated_strings.append(prompt_str)
+                                                            continue
+                                                        
+                                                        # Split system/content like in callback
+                                                        system_part = prompt_str[:2000]
+                                                        content_part = prompt_str[2000:]
+                                                        prompt_id = f"p{i}_{hashlib.md5(content_part[:100].encode()).hexdigest()[:8]}"
+                                                        
+                                                        # Deduplicate (ASYNC - allows parallel Summary calls to batch together)
+                                                        deduplicated_content = await corpus.enqueue_prompt(prompt_id, content_part)
+                                                        deduplicated_str = system_part + deduplicated_content
+                                                        deduplicated_strings.append(deduplicated_str)
+                                                    
+                                                    # Convert back to original format
+                                                    if isinstance(messages_to_dedupe, list):
+                                                        for i, msg in enumerate(messages_to_dedupe):
+                                                            if i < len(deduplicated_strings) and hasattr(msg, 'content'):
+                                                                msg.content = deduplicated_strings[i]
+                                                    elif isinstance(messages_to_dedupe, str):
+                                                        messages_to_dedupe = deduplicated_strings[0] if deduplicated_strings else messages_to_dedupe
+                                                    
+                                                    # Replace in args/kwargs
+                                                    if args and arg_index < len(args):
+                                                        args = list(args)
+                                                        args[arg_index] = messages_to_dedupe
+                                                        args = tuple(args)
+                                                    elif 'input' in kwargs:
+                                                        kwargs['input'] = messages_to_dedupe
+                                                    elif 'messages' in kwargs:
+                                                        kwargs['messages'] = messages_to_dedupe
+                                                    elif 'prompts' in kwargs:
+                                                        kwargs['prompts'] = messages_to_dedupe
+                                    except Exception as e:
+                                        print(f"[🔥 HOTPATH] ⚠️ Deduplication error: {e}")
+                                        import traceback
+                                        traceback.print_exc()
+                                
+                                try:
+                                    result = await orig_method(self_llm, *args, **kwargs)
+                                    
+                                    # 🚨 MICROTURN ENFORCEMENT - Only if tool_end rules exist
+                                    in_microturn = in_microturn_getter()
+                                    if not in_microturn:
+                                        run_number = getattr(callback_handler, '_run_number', 1) if callback_handler else 1
+                                        if run_number == 1 and callback_handler:
+                                            # GATE: Only run microturn if tool_end rules exist
+                                            from .microturn import has_tool_end_rules, extract_proposed_function_calls, extract_tool_call_signatures
+                                            
+                                            if not has_tool_end_rules(callback_handler):
+                                                # No tool_end rules - silently skip microturn
+                                                pass
+                                            else:
+                                                # Check if we've already processed these specific tool calls (prevents duplicate checks as call stack unwinds)
+                                                temp_names, temp_msg = extract_proposed_function_calls(result)
+                                                if temp_msg:
+                                                    temp_sigs = extract_tool_call_signatures(temp_msg)
+                                                    tool_calls_sig = f"{','.join(sorted(temp_sigs.values()))}" if temp_sigs else "empty"
+                                                else:
+                                                    tool_calls_sig = f"{','.join(sorted(temp_names))}" if temp_names else "empty"
+                                                
+                                                if not hasattr(_patch_depth, 'processed_tool_calls'):
+                                                    _patch_depth.processed_tool_calls = set()
+                                                
+                                                if tool_calls_sig not in _patch_depth.processed_tool_calls:
+                                                    # Mark these specific tool calls as processed
+                                                    _patch_depth.processed_tool_calls.add(tool_calls_sig)
+                                                
+                                                    # Run microturn enforcement (for tool CALLS)
+                                                    from .microturn import run_microturn_enforcement
+                                                    try:
+                                                        await run_microturn_enforcement(
+                                                            result=result,
+                                                            callback_handler=callback_handler,
+                                                            self_llm=self_llm,
+                                                            patch_depth=_patch_depth,
+                                                            use_llm_microturn=USE_LLM_MICROTURN
+                                                        )
+                                                    except Exception as e:
+                                                        print(f"[DASEIN][MICROTURN] ⚠️ Microturn error: {e}")
+                                    
+                                    return result
+                                finally:
+                                    depth_tracker.value = depth  # Restore depth on exit
+                                    # Clear processed tool calls set when returning to entry point (prevents memory leak)
+                                    if depth == 0:
+                                        if hasattr(_patch_depth, 'processed_tool_calls'):
+                                            _patch_depth.processed_tool_calls.clear()
+                                        if hasattr(_patch_depth, 'seen_tool_signatures'):
+                                            _patch_depth.seen_tool_signatures.clear()
+                                        if hasattr(_patch_depth, 'tool_result_cache'):
+                                            _patch_depth.tool_result_cache.clear()
+                        else:
+                            def patched_method(self_llm, *args, **kwargs):
+                                # Track depth to find the leaf method
+                                depth = getattr(depth_tracker, 'value', 0)
+                                is_entry_point = (depth == 0)
+                                depth_tracker.value = depth + 1
+                                current_depth = depth_tracker.value
+                                
+                                # Track max depth reached
+                                if is_entry_point:
+                                    max_depth_setter(current_depth)  # Reset for new entry
+                                else:
+                                    # Update max if we went deeper
+                                    if current_depth > max_depth_getter():
+                                        max_depth_setter(current_depth)
+                                
+                                # 🔥 PIPECLEANER DEDUPLICATION (only patching top-level methods, always apply)
+                                # Skip depth checks - they don't work with async/parallel execution
+                                if callback_handler:
+                                    try:
+                                        # Extract messages from args based on method signature
+                                        messages_to_dedupe = None
+                                        arg_index = 0
+                                        
+                                        if meth_name in ['invoke', 'ainvoke']:
+                                            messages_to_dedupe = args[0] if args else kwargs.get('input', kwargs.get('messages'))
+                                            arg_index = 0
+                                        elif meth_name in ['_generate', '_agenerate']:
+                                            messages_to_dedupe = args[0] if args else kwargs.get('messages')
+                                            arg_index = 0
+                                        elif meth_name in ['generate', 'agenerate']:
+                                            messages_to_dedupe = args[0] if args else kwargs.get('prompts')
+                                            arg_index = 0
+                                        
+                                        # Convert to strings for deduplication
+                                        if messages_to_dedupe:
+                                            prompt_strings = []
+                                            for msg in (messages_to_dedupe if isinstance(messages_to_dedupe, list) else [messages_to_dedupe]):
+                                                if hasattr(msg, 'content'):
+                                                    prompt_strings.append(msg.content)
+                                                elif isinstance(msg, str):
+                                                    prompt_strings.append(msg)
+                                                else:
+                                                    prompt_strings.append(str(msg))
+                                            
+                                            # =============================================================
+                                            # HOTPATH DEBUGGING (commented out for production)
+                                            # =============================================================
+                                            # print(f"\n{'='*70}")
+                                            # print(f"[🔥 HOTPATH FULL DEBUG] {meth_name}() call")
+                                            # print(f"{'='*70}")
+                                            # 
+                                            # # 1. Callback state
+                                            # current_node = getattr(callback_handler, '_current_chain_node', None)
+                                            # current_tool = getattr(callback_handler, '_current_tool_name', None)
+                                            # print(f"[🔥] Current node: {current_node}")
+                                            # print(f"[🔥] Current tool: {current_tool}")
+                                            # 
+                                            # # 2. Tools in this call
+                                            # tools_in_call = []
+                                            # if 'invocation_params' in kwargs:
+                                            #     tools = kwargs['invocation_params'].get('tools') or kwargs['invocation_params'].get('functions') or []
+                                            #     tools_in_call = [t.get('name', t.get('function', {}).get('name', '?')) for t in tools]
+                                            # elif 'tools' in kwargs:
+                                            #     tools_in_call = [t.get('name', '?') for t in kwargs.get('tools', [])]
+                                            # elif 'functions' in kwargs:
+                                            #     tools_in_call = [t.get('name', '?') for t in kwargs.get('functions', [])]
+                                            # print(f"[🔥] Tools in call: {tools_in_call if tools_in_call else 'NONE'}")
+                                            # 
+                                            # # 3. Prompt characteristics
+                                            # prompt_lens = [len(s) for s in prompt_strings]
+                                            # print(f"[🔥] Prompt count: {len(prompt_strings)}")
+                                            # print(f"[🔥] Prompt lengths: {prompt_lens}")
+                                            # 
+                                            # # 4. Kwargs keys (for debugging)
+                                            # print(f"[🔥] Kwargs keys: {list(kwargs.keys())}")
+                                            # 
+                                            # # 5. Messages structure
+                                            # if messages_to_dedupe:
+                                            #     if isinstance(messages_to_dedupe, list):
+                                            #         msg_types = [type(m).__name__ for m in messages_to_dedupe[:3]]
+                                            #         print(f"[🔥] Message types (first 3): {msg_types}")
+                                            #     else:
+                                            #         print(f"[🔥] Messages type: {type(messages_to_dedupe).__name__}")
+                                            # 
+                                            # print(f"{'='*70}\n")
+                                            # 
+                                            # # Show first 200 chars to see the fingerprint
+                                            # if prompt_strings:
+                                            #     first_200 = prompt_strings[0][:200] if len(prompt_strings[0]) > 200 else prompt_strings[0]
+                                            #     print(f"[🔥] Prompt start (200 chars): {first_200}")
+                                            
+                                            # =============================================================
+                                            # Extract tools from LLM call kwargs (for filter_search rules)
+                                            # =============================================================
+                                            tools_in_this_call = []
+                                            
+                                            # Extract tool names from kwargs (handles multiple LLM providers' formats)
+                                            # Pattern 1: invocation_params (some providers)
+                                            if 'invocation_params' in kwargs:
+                                                inv_params = kwargs['invocation_params']
+                                                tools_param = inv_params.get('tools') or inv_params.get('functions') or []
+                                                for t in tools_param:
+                                                    if isinstance(t, dict):
+                                                        # Try: t['name'] or t['function']['name']
+                                                        name = t.get('name') or (t.get('function', {}).get('name') if isinstance(t.get('function'), dict) else None)
+                                                        if name:
+                                                            tools_in_this_call.append(name)
+                                            # Pattern 2: Direct 'tools' key (common)
+                                            elif 'tools' in kwargs:
+                                                tools_param = kwargs.get('tools', [])
+                                                for t in tools_param:
+                                                    if isinstance(t, dict):
+                                                        # Try: t['name'] or t['function']['name']
+                                                        name = t.get('name') or (t.get('function', {}).get('name') if isinstance(t.get('function'), dict) else None)
+                                                        if name:
+                                                            tools_in_this_call.append(name)
+                                            # Pattern 3: 'functions' key (OpenAI function calling)
+                                            elif 'functions' in kwargs:
+                                                funcs_param = kwargs.get('functions', [])
+                                                for t in funcs_param:
+                                                    if isinstance(t, dict):
+                                                        name = t.get('name')
+                                                        if name:
+                                                            tools_in_this_call.append(name)
+                                            
+                                            # Check if any filter_search rules match the tools in this LLM call
+                                            from .pipecleaner import _find_filter_search_rules
+                                            filter_rules = None
+                                            should_dedupe = False
+                                            
+                                            if hasattr(callback_handler, '_selected_rules') and prompt_strings and tools_in_this_call:
+                                                # Get all filter_search rules (they specify which tools to target via references.tools)
+                                                filter_rules = _find_filter_search_rules('*', callback_handler._selected_rules)
+                                                
+                                                # Check if any tool in this call matches rule's target tools
+                                                if filter_rules:
+                                                    for rule in filter_rules:
+                                                        # Handle both dict and object formats
+                                                        if isinstance(rule, dict):
+                                                            references = rule.get('references', {})
+                                                            rule_tools = references.get('tools', []) if isinstance(references, dict) else []
+                                                        else:
+                                                            references = getattr(rule, 'references', None)
+                                                            # references might be a dict or object, handle both
+                                                            if isinstance(references, dict):
+                                                                rule_tools = references.get('tools', [])
+                                                            elif references:
+                                                                rule_tools = getattr(references, 'tools', [])
+                                                            else:
+                                                                rule_tools = []
+                                                        
+                                                        for tool_in_call in tools_in_this_call:
+                                                            if tool_in_call.lower() in [rt.lower() for rt in rule_tools]:
+                                                                should_dedupe = True
+                                                                break
+                                                        if should_dedupe:
+                                                            break
+                                            
+                                            if should_dedupe:
+                                                    # Deduplicate each prompt
+                                                    from .pipecleaner import get_or_create_corpus
+                                                    import hashlib
+                                                    corpus = get_or_create_corpus(callback_handler.run_id, verbose=callback_handler._verbose)
+                                                    
+                                                    deduplicated_strings = []
+                                                    for i, prompt_str in enumerate(prompt_strings):
+                                                        if len(prompt_str) < 2500:
+                                                            deduplicated_strings.append(prompt_str)
+                                                            continue
+                                                        
+                                                        # Split system/content like in callback
+                                                        system_part = prompt_str[:2000]
+                                                        content_part = prompt_str[2000:]
+                                                        prompt_id = f"p{i}_{hashlib.md5(content_part[:100].encode()).hexdigest()[:8]}"
+                                                        
+                                                        # Deduplicate (wrap async in sync context)
+                                                        import asyncio
+                                                        try:
+                                                            loop = asyncio.get_event_loop()
+                                                        except RuntimeError:
+                                                            loop = asyncio.new_event_loop()
+                                                            asyncio.set_event_loop(loop)
+                                                        
+                                                        deduplicated_content = loop.run_until_complete(corpus.enqueue_prompt(prompt_id, content_part))
+                                                        deduplicated_str = system_part + deduplicated_content
+                                                        deduplicated_strings.append(deduplicated_str)
+                                                    
+                                                    # Convert back to original format
+                                                    if isinstance(messages_to_dedupe, list):
+                                                        for i, msg in enumerate(messages_to_dedupe):
+                                                            if i < len(deduplicated_strings) and hasattr(msg, 'content'):
+                                                                msg.content = deduplicated_strings[i]
+                                                    elif isinstance(messages_to_dedupe, str):
+                                                        messages_to_dedupe = deduplicated_strings[0] if deduplicated_strings else messages_to_dedupe
+                                                    
+                                                    # Replace in args/kwargs
+                                                    if args and arg_index < len(args):
+                                                        args = list(args)
+                                                        args[arg_index] = messages_to_dedupe
+                                                        args = tuple(args)
+                                                    elif 'input' in kwargs:
+                                                        kwargs['input'] = messages_to_dedupe
+                                                    elif 'messages' in kwargs:
+                                                        kwargs['messages'] = messages_to_dedupe
+                                                    elif 'prompts' in kwargs:
+                                                        kwargs['prompts'] = messages_to_dedupe
+                                    except Exception as e:
+                                        print(f"[🔥 HOTPATH] ⚠️ Deduplication error: {e}")
+                                        import traceback
+                                        traceback.print_exc()
+                                
+                                try:
+                                    result = orig_method(self_llm, *args, **kwargs)
+                                    
+                                    # 🚨 MICROTURN ENFORCEMENT - Only at the DEEPEST level (max depth)
+                                    if current_depth == max_depth_getter():
+                                        run_number = getattr(callback_handler, '_run_number', 1) if callback_handler else 1
+                                        if run_number == 1 and callback_handler:
+                                            print(f"[DASEIN][MICROTURN_DEBUG] 🎯 DEEPEST METHOD: {meth_name} (depth={current_depth}) - Checking result...")
+                                            print(f"[DASEIN][MICROTURN_DEBUG] Result type: {type(result)}")
+                                            # TODO: Add full microturn logic here
+                                    
+                                    return result
+                                finally:
+                                    depth_tracker.value = depth  # Restore depth on exit
+                                    # Clear processed tool calls set when returning to entry point (prevents memory leak)
+                                    if depth == 0:
+                                        if hasattr(_patch_depth, 'processed_tool_calls'):
+                                            _patch_depth.processed_tool_calls.clear()
+                                        if hasattr(_patch_depth, 'seen_tool_signatures'):
+                                            _patch_depth.seen_tool_signatures.clear()
+                                        if hasattr(_patch_depth, 'tool_result_cache'):
+                                            _patch_depth.tool_result_cache.clear()
+                        return patched_method
+                    
+                    patched_method = make_patched_method(original_method, method_name, is_async, _patch_depth, get_max_depth, set_max_depth, is_in_microturn, set_in_microturn, get_summary_calls_made, increment_summary_calls)
+                    
+                    # Mark and apply the patch
+                    patched_method._dasein_patched = True
+                    setattr(llm_class, method_name, patched_method)
+                    print(f"[DASEIN][WRAPPER] ✅ Patched {method_name}")
+                
+                # Mark this class as patched
+                patched_classes.add(llm_class)
+                self._wrapped_llm = llm
+                print(f"[DASEIN][WRAPPER] Successfully patched {len(methods_to_patch)} methods in {llm_class.__name__}")
+            
+            print(f"[DASEIN][WRAPPER] Finished patching {len(patched_classes)} unique LLM class(es)")
+            return
+        except Exception as e:
+            print(f"[DASEIN][WRAPPER] Failed to wrap agent LLM: {e}")
+            import traceback
+            traceback.print_exc()
             self._wrapped_llm = None
     
     def _set_callback_handler_llm(self):
@@ -1589,7 +2405,7 @@ Follow these rules when planning your actions."""
         
         return False
     
-    def _replace_llm_in_structure(self, obj, original_llm, wrapped_llm, max_depth=5, path=""):
+    def _replace_llm_in_structure(self, obj, original_llm, wrapped_llm, max_depth=5, path="", count=[0]):
         """Replace the original LLM with wrapped LLM in the structure."""
         if max_depth <= 0:
             return
@@ -1598,16 +2414,16 @@ Follow these rules when planning your actions."""
         if hasattr(obj, 'steps') and hasattr(obj, '__iter__'):
             for i, step in enumerate(obj.steps):
                 if step is original_llm:
-                    self._vprint(f"[DASEIN][WRAPPER] Replacing LLM at {path}.steps[{i}]")
+                    count[0] += 1
+                    print(f"[DASEIN][WRAPPER] Replacing LLM #{count[0]} at {path}.steps[{i}]")
                     obj.steps[i] = wrapped_llm
-                    return
                 # Check if step has bound attribute (RunnableBinding)
                 if hasattr(step, 'bound') and step.bound is original_llm:
-                    self._vprint(f"[DASEIN][WRAPPER] Replacing LLM at {path}.steps[{i}].bound")
+                    count[0] += 1
+                    print(f"[DASEIN][WRAPPER] Replacing LLM #{count[0]} at {path}.steps[{i}].bound")
                     step.bound = wrapped_llm
-                    return
                 # Recursively search in the step
-                self._replace_llm_in_structure(step, original_llm, wrapped_llm, max_depth - 1, f"{path}.steps[{i}]")
+                self._replace_llm_in_structure(step, original_llm, wrapped_llm, max_depth - 1, f"{path}.steps[{i}]", count)
         
         # Search in attributes
         for attr_name in dir(obj):
@@ -1616,8 +2432,12 @@ Follow these rules when planning your actions."""
             try:
                 attr_value = getattr(obj, attr_name)
                 if attr_value is original_llm:
-                    self._vprint(f"[DASEIN][WRAPPER] Replacing LLM at {path}.{attr_name}")
+                    print(f"[DASEIN][WRAPPER] Replacing LLM at {path}.{attr_name}")
                     setattr(obj, attr_name, wrapped_llm)
+                    # Verify replacement
+                    new_value = getattr(obj, attr_name)
+                    print(f"[DASEIN][WRAPPER] After replacement, {path}.{attr_name} is now: {type(new_value).__name__}")
+                    print(f"[DASEIN][WRAPPER] Is it our wrapper? {isinstance(new_value, DaseinLLMWrapper)}")
                     return
                 # Recursively search in the attribute
                 if hasattr(attr_value, '__dict__') or hasattr(attr_value, '__iter__'):
@@ -2032,6 +2852,11 @@ Follow these rules when planning your actions."""
         # Clear tool rules from system prompt after triggering async post-run
         self._clear_tool_rules_from_system()
         
+        # Cleanup run-scoped corpus (print telemetry and free memory)
+        if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'run_id'):
+            from .pipecleaner import cleanup_corpus
+            cleanup_corpus(self._callback_handler.run_id)
+        
         return result
     
     async def _ainvoke_single(self, *args, **kwargs):
@@ -2108,6 +2933,11 @@ Follow these rules when planning your actions."""
         
         # Clear tool rules from system prompt after triggering async post-run
         self._clear_tool_rules_from_system()
+        
+        # Cleanup run-scoped corpus (print telemetry and free memory)
+        if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'run_id'):
+            from .pipecleaner import cleanup_corpus
+            cleanup_corpus(self._callback_handler.run_id)
         
         return result
     
@@ -2520,11 +3350,8 @@ Follow these rules when planning your actions."""
         print(f"  Wall Time (ms): {metrics['wall_time_ms']}")
         print(f"  Success Rate: {metrics['success_rate']:.1f}% ({metrics['total_turns']}/{metrics['total_turns']})")
         print(f"  Overall Success: {'✅' if metrics['overall_success'] else '❌'}")
-        # Format final outcome using the wrapped LLM's method
-        if hasattr(self, '_wrapped_llm') and self._wrapped_llm:
-            final_outcome_formatted = self._wrapped_llm._format_final_outcome(metrics.get('final_outcome', 'unknown'))
-        else:
-            final_outcome_formatted = f" {metrics.get('final_outcome', 'unknown')}"
+        # Format final outcome
+        final_outcome_formatted = self._format_final_outcome(metrics.get('final_outcome', 'unknown'))
         print(f"  Final Outcome: {final_outcome_formatted}")
         print(f"  Result: {str(metrics['result'])[:100]}...")
     
@@ -2606,12 +3433,8 @@ Follow these rules when planning your actions."""
         first_outcome = first_metrics.get('final_outcome', 'unknown')
         last_outcome = last_metrics.get('final_outcome', 'unknown')
         # Format final outcomes using the wrapped LLM's method
-        if hasattr(self, '_wrapped_llm') and self._wrapped_llm:
-            first_formatted = self._wrapped_llm._format_final_outcome(first_outcome)
-            last_formatted = self._wrapped_llm._format_final_outcome(last_outcome)
-        else:
-            first_formatted = f"❓ {first_outcome}"
-            last_formatted = f"❓ {last_outcome}"
+        first_formatted = self._format_final_outcome(first_outcome)
+        last_formatted = self._format_final_outcome(last_outcome)
         outcome_improvement = f"{first_formatted} → {last_formatted}"
         print(f"🎯 Final Outcome: {outcome_improvement}")
         
@@ -2633,13 +3456,8 @@ Follow these rules when planning your actions."""
         
         # Prioritize final outcome improvement
         if outcome_improved:
-            # Format final outcomes using the wrapped LLM's method
-            if hasattr(self, '_wrapped_llm') and self._wrapped_llm:
-                first_formatted = self._wrapped_llm._format_final_outcome(first_outcome)
-                last_formatted = self._wrapped_llm._format_final_outcome(last_outcome)
-            else:
-                first_formatted = f" {first_outcome}"
-                last_formatted = f" {last_outcome}"
+            first_formatted = self._format_final_outcome(first_outcome)
+            last_formatted = self._format_final_outcome(last_outcome)
             print(f"🎉 BREAKTHROUGH: Agent went from {first_formatted} to {last_formatted}!")
         elif turns_improved or tokens_improved or time_improved or success_improved:
             improvements = []
@@ -2913,6 +3731,38 @@ Follow these rules when planning your actions."""
             )
             
             print(f"[DASEIN] Pre-run service returned {len(selected_rules)} rules")
+            
+            # Pre-load embedding model if we have filter_search rules (avoid timeout on first batch)
+            if selected_rules:
+                # Check for any llm_start rules with "filter search" keywords
+                has_filter_search_rules = False
+                for rule_meta in selected_rules:
+                    # Unwrap tuple if needed
+                    rule_obj = rule_meta[0] if isinstance(rule_meta, tuple) and len(rule_meta) == 2 else rule_meta
+                    
+                    # Check if this is an llm_start rule with filter/search keywords
+                    # Handle both dict and object formats
+                    if isinstance(rule_obj, dict):
+                        target_step_type = rule_obj.get('target_step_type')
+                        advice = rule_obj.get('advice_text') or rule_obj.get('advice', '')
+                    else:
+                        target_step_type = getattr(rule_obj, 'target_step_type', None)
+                        advice = getattr(rule_obj, 'advice_text', None) or getattr(rule_obj, 'advice', None) or ''
+                    
+                    advice_lower = advice.lower() if advice else ''
+                    
+                    if target_step_type == 'llm_start' and 'filter' in advice_lower and 'search' in advice_lower:
+                        has_filter_search_rules = True
+                        break
+                
+                if has_filter_search_rules:
+                    print(f"[DASEIN] 🔧 Pre-loading embedding model for pipecleaner (found filter search rules)...")
+                    from .pipecleaner import _get_embedding_model
+                    try:
+                        _get_embedding_model()  # Warm up the model
+                        print(f"[DASEIN] ✅ Embedding model pre-loaded successfully")
+                    except Exception as e:
+                        print(f"[DASEIN] ⚠️  Failed to pre-load embedding model: {e}")
             
             #  CRITICAL: For LangGraph agents, recreate with injected prompt
             if self._is_langgraph and selected_rules:
@@ -3739,11 +4589,8 @@ Follow these rules when planning your actions."""
         
         # Step-by-step comparison
         print(f"\n STEP-BY-STEP COMPARISON:")
-        # Format step 1 outcome using the wrapped LLM's method
-        if hasattr(self, '_wrapped_llm') and self._wrapped_llm:
-            step1_outcome = self._wrapped_llm._format_final_outcome(learning_metrics[0].get('final_outcome', 'unknown'))
-        else:
-            step1_outcome = f" {learning_metrics[0].get('final_outcome', 'unknown')}"
+        # Format step 1 outcome
+        step1_outcome = self._format_final_outcome(learning_metrics[0].get('final_outcome', 'unknown'))
         print(f"  Step 1: {learning_metrics[0]['total_tokens']} tokens, {learning_metrics[0]['total_turns']} turns, {learning_metrics[0]['trace_time_ms']}ms, {learning_metrics[0]['success_rate']:.1f}%, {step1_outcome} (naive baseline)")
         
         # Compare steps 2N (learning vs baseline)
@@ -3768,13 +4615,8 @@ Follow these rules when planning your actions."""
             failure_direction = "" if failure_change > 0 else "" if failure_change < 0 else "="
             
             # Get final outcomes for this step
-            # Format final outcomes using the wrapped LLM's method
-            if hasattr(self, '_wrapped_llm') and self._wrapped_llm:
-                base_outcome = self._wrapped_llm._format_final_outcome(base.get('final_outcome', 'unknown'))
-                learn_outcome = self._wrapped_llm._format_final_outcome(learn.get('final_outcome', 'unknown'))
-            else:
-                base_outcome = f" {base.get('final_outcome', 'unknown')}"
-                learn_outcome = f" {learn.get('final_outcome', 'unknown')}"
+            base_outcome = self._format_final_outcome(base.get('final_outcome', 'unknown'))
+            learn_outcome = self._format_final_outcome(learn.get('final_outcome', 'unknown'))
             
             print(f"  Step {i}: {base['total_tokens']}  {learn['total_tokens']} tokens ({token_direction}{abs(token_improvement)}, {token_pct:+.1f}%)")
             print(f"         {base['total_turns']}  {learn['total_turns']} turns ({turn_direction}{abs(turn_improvement)}, {turn_pct:+.1f}%)")
