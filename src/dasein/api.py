@@ -1759,14 +1759,24 @@ Follow these rules when planning your actions."""
             # 1. Search in agent
             agent_llm = self._find_llm_recursively(self._agent, max_depth=5)
             if agent_llm:
-                all_llms.append(('agent', agent_llm))
+                # CRITICAL: If this is a DaseinLLMWrapper, we need to patch the INNER LLM for pipecleaner!
+                # But we skip patching the wrapper itself to avoid double callbacks
+                if isinstance(agent_llm, DaseinLLMWrapper) and hasattr(agent_llm, '_llm'):
+                    print(f"[DASEIN][WRAPPER] Found DaseinLLMWrapper, patching inner LLM: {type(agent_llm._llm).__name__}")
+                    all_llms.append(('agent_inner', agent_llm._llm))
+                else:
+                    all_llms.append(('agent', agent_llm))
             
             # 2. Search in tools (where Summary LLM lives!)
             if hasattr(self._agent, 'tools'):
                 for i, tool in enumerate(self._agent.tools or []):
                     tool_llm = self._find_llm_recursively(tool, max_depth=3, path=f"tools[{i}]")
                     if tool_llm:
-                        all_llms.append((f'tool_{i}_{getattr(tool, "name", "unknown")}', tool_llm))
+                        # Skip if it's a DaseinLLMWrapper (already handles callbacks)
+                        if isinstance(tool_llm, DaseinLLMWrapper):
+                            print(f"[DASEIN][WRAPPER] Found DaseinLLMWrapper in tool - skipping")
+                        else:
+                            all_llms.append((f'tool_{i}_{getattr(tool, "name", "unknown")}', tool_llm))
             
             print(f"[DASEIN][WRAPPER] Found {len(all_llms)} LLM(s)")
             for location, llm in all_llms:
@@ -2050,42 +2060,9 @@ Follow these rules when planning your actions."""
                                         traceback.print_exc()
                                 
                                 try:
-                                    # CRITICAL FIX: Ensure callbacks propagate to _generate/_agenerate
-                                    # AgentExecutor doesn't pass run_manager to these internal methods
-                                    # So we need to manually inject the callback handler
-                                    if meth_name in ['_generate', '_agenerate'] and callback_handler:
-                                        if 'run_manager' not in kwargs and hasattr(callback_handler, 'on_llm_start'):
-                                            # Manually trigger on_llm_start since no run_manager
-                                            import uuid
-                                            run_id = uuid.uuid4()
-                                            # Extract messages for on_llm_start
-                                            messages = args[0] if args else []
-                                            prompts = []
-                                            for msg in (messages if isinstance(messages, list) else [messages]):
-                                                if hasattr(msg, 'content'):
-                                                    prompts.append(str(msg.content))
-                                                else:
-                                                    prompts.append(str(msg))
-                                            
-                                            # Call on_llm_start
-                                            callback_handler.on_llm_start(
-                                                serialized={'name': type(self_llm).__name__},
-                                                prompts=prompts,
-                                                run_id=run_id
-                                            )
-                                            
-                                            # Store run_id for on_llm_end
-                                            if not hasattr(self_llm, '_dasein_pending_run_ids'):
-                                                self_llm._dasein_pending_run_ids = []
-                                            self_llm._dasein_pending_run_ids.append(run_id)
-                                    
+                                    # NOTE: Manual callback injection DISABLED - DaseinLLMWrapper handles callbacks
+                                    # The patched methods ONLY do pipecleaner deduplication, not callbacks
                                     result = await orig_method(self_llm, *args, **kwargs)
-                                    
-                                    # Call on_llm_end if we called on_llm_start
-                                    if meth_name in ['_generate', '_agenerate'] and callback_handler:
-                                        if hasattr(self_llm, '_dasein_pending_run_ids') and self_llm._dasein_pending_run_ids:
-                                            run_id = self_llm._dasein_pending_run_ids.pop(0)
-                                            callback_handler.on_llm_end(result, run_id=run_id)
                                     
                                     # 🚨 MICROTURN ENFORCEMENT - DISABLED
                                     # Microturn can interfere with tool execution, so it's disabled
@@ -2315,42 +2292,9 @@ Follow these rules when planning your actions."""
                                         traceback.print_exc()
                                 
                                 try:
-                                    # CRITICAL FIX: Ensure callbacks propagate to _generate/_agenerate
-                                    # AgentExecutor doesn't pass run_manager to these internal methods
-                                    # So we need to manually inject the callback handler
-                                    if meth_name in ['_generate', '_agenerate'] and callback_handler:
-                                        if 'run_manager' not in kwargs and hasattr(callback_handler, 'on_llm_start'):
-                                            # Manually trigger on_llm_start since no run_manager
-                                            import uuid
-                                            run_id = uuid.uuid4()
-                                            # Extract messages for on_llm_start
-                                            messages = args[0] if args else []
-                                            prompts = []
-                                            for msg in (messages if isinstance(messages, list) else [messages]):
-                                                if hasattr(msg, 'content'):
-                                                    prompts.append(str(msg.content))
-                                                else:
-                                                    prompts.append(str(msg))
-                                            
-                                            # Call on_llm_start
-                                            callback_handler.on_llm_start(
-                                                serialized={'name': type(self_llm).__name__},
-                                                prompts=prompts,
-                                                run_id=run_id
-                                            )
-                                            
-                                            # Store run_id for on_llm_end
-                                            if not hasattr(self_llm, '_dasein_pending_run_ids'):
-                                                self_llm._dasein_pending_run_ids = []
-                                            self_llm._dasein_pending_run_ids.append(run_id)
-                                    
+                                    # NOTE: Manual callback injection DISABLED - DaseinLLMWrapper handles callbacks
+                                    # The patched methods ONLY do pipecleaner deduplication, not callbacks
                                     result = orig_method(self_llm, *args, **kwargs)
-                                    
-                                    # Call on_llm_end if we called on_llm_start
-                                    if meth_name in ['_generate', '_agenerate'] and callback_handler:
-                                        if hasattr(self_llm, '_dasein_pending_run_ids') and self_llm._dasein_pending_run_ids:
-                                            run_id = self_llm._dasein_pending_run_ids.pop(0)
-                                            callback_handler.on_llm_end(result, run_id=run_id)
                                     
                                     # 🚨 MICROTURN ENFORCEMENT - DISABLED (can interfere with tool execution)
                                     # TODO: Re-enable with proper gating if needed
