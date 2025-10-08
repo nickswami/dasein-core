@@ -887,6 +887,11 @@ class CognateProxy:
         # Wrap the agent's LLM with our trace capture wrapper
         self._wrap_agent_llm()
         
+        # CRITICAL: Update langgraph_params to use wrapped LLM for recreation
+        if self._is_langgraph and self._langgraph_params and self._wrapped_llm:
+            print(f" [DASEIN][WRAPPER] Updating langgraph_params to use wrapped LLM")
+            self._langgraph_params['model'] = self._wrapped_llm
+        
         # Inject universal dead-letter tool
         self._inject_deadletter_tool()
     
@@ -3841,7 +3846,11 @@ Follow these rules when planning your actions."""
                     print(f"[DASEIN] 🔧 Pre-loading embedding model for pipecleaner (found filter search rules)...")
                     from .pipecleaner import _get_embedding_model
                     try:
-                        _get_embedding_model()  # Warm up the model
+                        # Suppress protobuf warnings from sentence-transformers
+                        import warnings
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings('ignore', category=Warning)
+                            _get_embedding_model()  # Warm up the model
                         print(f"[DASEIN] ✅ Embedding model pre-loaded successfully")
                     except Exception as e:
                         print(f"[DASEIN] ⚠️  Failed to pre-load embedding model: {e}")
