@@ -87,9 +87,6 @@ class DaseinToolWrapper(BaseTool):
                 # Use original input
                 result = self.original_tool._run(*args, **kwargs)
             
-            # 🧹 PIPECLEANER: Apply deduplication to tool result (microturn-style interception)
-            result = self._apply_pipecleaner_to_result(result)
-            
             # Capture the tool output in the trace
             self._vprint(f"[DASEIN][TOOL_WRAPPER] About to capture tool output for {self.name}")
             self._capture_tool_output(self.name, args, kwargs, result)
@@ -144,9 +141,6 @@ class DaseinToolWrapper(BaseTool):
                 # Use original input
                 result = await self.original_tool._arun(*args, **kwargs)
             
-            # 🧹 PIPECLEANER: Apply deduplication to tool result (microturn-style interception)
-            result = self._apply_pipecleaner_to_result(result)
-            
             # Capture the tool output in the trace
             self._vprint(f"[DASEIN][TOOL_WRAPPER] About to capture tool output for {self.name}")
             self._capture_tool_output(self.name, args, kwargs, result)
@@ -179,9 +173,6 @@ class DaseinToolWrapper(BaseTool):
         else:
             # Use original input
             result = await self.original_tool.ainvoke(input_data, config, **kwargs)
-        
-        # 🧹 PIPECLEANER: Apply deduplication to tool result (microturn-style interception)
-        result = self._apply_pipecleaner_to_result(result)
         
         return result
     
@@ -307,51 +298,6 @@ Apply the rule to fix the input. Return only the corrected input, nothing else."
         except Exception as e:
             self._vprint(f"[DASEIN][MICROTURN] Error executing micro-turn LLM call: {e}")
             return original_input
-    
-    def _apply_pipecleaner_to_result(self, result):
-        """
-        Apply pipecleaner deduplication to tool result (microturn-style interception).
-        
-        This is called right after tool execution, before returning result to agent.
-        Similar to how microturn intercepts LLM responses.
-        """
-        try:
-            # Get callback handler's rules
-            if not self.callback_handler or not hasattr(self.callback_handler, '_selected_rules'):
-                return result
-            
-            # Convert result to string
-            result_str = str(result)
-            
-            print(f"[PIPECLEANER DEBUG] Tool wrapper intercepted: {self.name}")
-            print(f"[PIPECLEANER DEBUG] Result length: {len(result_str)} chars")
-            print(f"[PIPECLEANER DEBUG] Rules count: {len(self.callback_handler._selected_rules)}")
-            
-            # Apply pipecleaner if filter search rule exists
-            from .pipecleaner import apply_pipecleaner_if_applicable
-            
-            # Get or initialize cached model from callback handler
-            cached_model = getattr(self.callback_handler, '_pipecleaner_embedding_model', None)
-            
-            deduplicated_str, model = apply_pipecleaner_if_applicable(
-                self.name,
-                result_str,
-                self.callback_handler._selected_rules,
-                cached_model=cached_model
-            )
-            
-            # Cache model for next search
-            if model is not None:
-                self.callback_handler._pipecleaner_embedding_model = model
-            
-            # Return deduplicated result (or original if no filter applied)
-            return deduplicated_str
-            
-        except Exception as e:
-            print(f"[PIPECLEANER] Error in result interception: {e}")
-            import traceback
-            traceback.print_exc()
-            return result
     
     def _capture_tool_output(self, tool_name, args, kwargs, result):
         """Capture tool output in the trace."""

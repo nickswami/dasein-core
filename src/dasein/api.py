@@ -173,10 +173,8 @@ class DaseinLLMWrapper(BaseChatModel):
         self._vprint(f"[DASEIN][TRACE] LLM result: {result_text[:100]}...")
         self._vprint(f"[DASEIN][METRICS] Tokens: {step['tokens_input']}->{output_tokens} | Time: {duration_ms}ms | Success: {'OK' if success else 'FAIL'}")
         
-        # 🚨 MICROTURN ENFORCEMENT - RUN 1 ONLY
-        run_number = getattr(self._callback_handler, '_run_number', 1) if self._callback_handler else 1
-        print(f"[DASEIN][MICROTURN_DEBUG] run_number={run_number}, callback_handler={self._callback_handler is not None}")
-        if run_number == 1 and self._callback_handler:
+        # 🚨 MICROTURN ENFORCEMENT - DISABLED (can interfere with tool execution)
+        if False:  # Disabled
             try:
                 proposed_func_name = None
                 print(f"[DASEIN][MICROTURN_DEBUG] Checking result for function call...")
@@ -886,25 +884,6 @@ class CognateProxy:
         # Wrap the agent's LLM with our trace capture wrapper
         self._wrap_agent_llm()
         
-        # Wrap the agent's tools for pipecleaner deduplication
-        print(f"\n{'='*70}")
-        print(f"[DASEIN] Patching tool execution for pipecleaner...")
-        print(f"{'='*70}")
-        try:
-            from .wrappers import wrap_tools_for_pipecleaner
-            verbose = getattr(self._callback_handler, '_verbose', False)
-            success = wrap_tools_for_pipecleaner(self._agent, self._callback_handler, verbose=verbose)
-            if success:
-                print(f"[DASEIN] ✅ Tool execution patched successfully")
-            else:
-                print(f"[DASEIN] ⚠️  Tool execution patching failed")
-            print(f"{'='*70}\n")
-        except Exception as e:
-            print(f"[DASEIN] ❌ ERROR patching tool execution: {e}")
-            import traceback
-            traceback.print_exc()
-            print(f"{'='*70}\n")
-        
         # Inject universal dead-letter tool
         self._inject_deadletter_tool()
     
@@ -1237,6 +1216,10 @@ class CognateProxy:
                 else:
                     tool = tool_tuple
                     node_name = None
+                
+                # Unwrap DaseinToolWrapper to get complete metadata (especially args_schema)
+                if hasattr(tool, 'original_tool'):
+                    tool = tool.original_tool
                 
                 tool_meta = {
                     'name': getattr(tool, 'name', str(tool.__class__.__name__)),
@@ -1994,45 +1977,9 @@ Follow these rules when planning your actions."""
                                 try:
                                     result = await orig_method(self_llm, *args, **kwargs)
                                     
-                                    # 🚨 MICROTURN ENFORCEMENT - Only if tool_end rules exist
-                                    in_microturn = in_microturn_getter()
-                                    if not in_microturn:
-                                        run_number = getattr(callback_handler, '_run_number', 1) if callback_handler else 1
-                                        if run_number == 1 and callback_handler:
-                                            # GATE: Only run microturn if tool_end rules exist
-                                            from .microturn import has_tool_end_rules, extract_proposed_function_calls, extract_tool_call_signatures
-                                            
-                                            if not has_tool_end_rules(callback_handler):
-                                                # No tool_end rules - silently skip microturn
-                                                pass
-                                            else:
-                                                # Check if we've already processed these specific tool calls (prevents duplicate checks as call stack unwinds)
-                                                temp_names, temp_msg = extract_proposed_function_calls(result)
-                                                if temp_msg:
-                                                    temp_sigs = extract_tool_call_signatures(temp_msg)
-                                                    tool_calls_sig = f"{','.join(sorted(temp_sigs.values()))}" if temp_sigs else "empty"
-                                                else:
-                                                    tool_calls_sig = f"{','.join(sorted(temp_names))}" if temp_names else "empty"
-                                                
-                                                if not hasattr(_patch_depth, 'processed_tool_calls'):
-                                                    _patch_depth.processed_tool_calls = set()
-                                                
-                                                if tool_calls_sig not in _patch_depth.processed_tool_calls:
-                                                    # Mark these specific tool calls as processed
-                                                    _patch_depth.processed_tool_calls.add(tool_calls_sig)
-                                                
-                                                    # Run microturn enforcement (for tool CALLS)
-                                                    from .microturn import run_microturn_enforcement
-                                                    try:
-                                                        await run_microturn_enforcement(
-                                                            result=result,
-                                                            callback_handler=callback_handler,
-                                                            self_llm=self_llm,
-                                                            patch_depth=_patch_depth,
-                                                            use_llm_microturn=USE_LLM_MICROTURN
-                                                        )
-                                                    except Exception as e:
-                                                        print(f"[DASEIN][MICROTURN] ⚠️ Microturn error: {e}")
+                                    # 🚨 MICROTURN ENFORCEMENT - DISABLED
+                                    # Microturn can interfere with tool execution, so it's disabled
+                                    # TODO: Re-enable with proper gating if needed for specific use cases
                                     
                                     return result
                                 finally:
@@ -2260,13 +2207,8 @@ Follow these rules when planning your actions."""
                                 try:
                                     result = orig_method(self_llm, *args, **kwargs)
                                     
-                                    # 🚨 MICROTURN ENFORCEMENT - Only at the DEEPEST level (max depth)
-                                    if current_depth == max_depth_getter():
-                                        run_number = getattr(callback_handler, '_run_number', 1) if callback_handler else 1
-                                        if run_number == 1 and callback_handler:
-                                            print(f"[DASEIN][MICROTURN_DEBUG] 🎯 DEEPEST METHOD: {meth_name} (depth={current_depth}) - Checking result...")
-                                            print(f"[DASEIN][MICROTURN_DEBUG] Result type: {type(result)}")
-                                            # TODO: Add full microturn logic here
+                                    # 🚨 MICROTURN ENFORCEMENT - DISABLED (can interfere with tool execution)
+                                    # TODO: Re-enable with proper gating if needed
                                     
                                     return result
                                 finally:
@@ -2286,7 +2228,7 @@ Follow these rules when planning your actions."""
                     # Mark and apply the patch
                     patched_method._dasein_patched = True
                     setattr(llm_class, method_name, patched_method)
-                    print(f"[DASEIN][WRAPPER] ✅ Patched {method_name}")
+                    print(f"[DASEIN][WRAPPER] Patched {method_name}")
                 
                 # Mark this class as patched
                 patched_classes.add(llm_class)

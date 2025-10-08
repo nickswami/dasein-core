@@ -29,13 +29,14 @@ def get_pipecleaner_context():
 
 def wrap_tools_for_pipecleaner(agent: Any, callback_handler: Any, verbose: bool = False) -> bool:
     """
-    Instrument tool execution paths for pipecleaner deduplication.
-    
-    Wraps:
-    - ToolNode._run_one/_arun_one (per-invocation choke point)
-    - BaseTool.invoke/ainvoke (catches @tool/StructuredTool)
-    - ToolMessage.__init__ (message construction)
+    DISABLED: This function has been disabled to avoid interfering with tool execution.
     """
+    print(f"[WRAPPERS DISABLED] wrap_tools_for_pipecleaner called but DISABLED - no patching will occur")
+    return False  # Return False to indicate nothing was done
+    
+    # ORIGINAL CODE BELOW - COMPLETELY DISABLED
+    if False:
+        pass
     try:
         import importlib
         
