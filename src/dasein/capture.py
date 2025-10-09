@@ -8,7 +8,7 @@ warnings.filterwarnings('ignore', category=FutureWarning, message='.*torch.distr
 warnings.filterwarnings('ignore', category=DeprecationWarning, message='.*Importing chat models from langchain.*')
 
 import hashlib
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Tuple
 from datetime import datetime
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.callbacks.manager import CallbackManagerForToolRun
@@ -2154,7 +2154,7 @@ def clear_trace() -> None:
         pass  # Ignore if not available
 
 
-def print_trace(max_chars: int = 240, only: tuple[str, ...] | None = None, suppress: tuple[str, ...] = ("chain_end",), show_tree: bool = True, show_summary: bool = True) -> None:
+def print_trace(max_chars: int = 240, only: Optional[Tuple[str, ...]] = None, suppress: Tuple[str, ...] = ("chain_end",), show_tree: bool = True, show_summary: bool = True) -> None:
     """
     Print a compact fixed-width table of the trace with tree-like view and filtering.
     

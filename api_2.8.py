@@ -60,6 +60,7 @@ class DaseinLLMWrapper(BaseChatModel):
     
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         """Generate response and capture trace."""
+        print(f"[DASEIN][WRAPPER] _generate called with {len(messages)} messages")
         self._vprint(f"[DASEIN][TRACE] LLM wrapper _generate called with {len(messages)} messages")
         
         # Get model name dynamically
@@ -172,8 +173,10 @@ class DaseinLLMWrapper(BaseChatModel):
         self._vprint(f"[DASEIN][TRACE] LLM result: {result_text[:100]}...")
         self._vprint(f"[DASEIN][METRICS] Tokens: {step['tokens_input']}->{output_tokens} | Time: {duration_ms}ms | Success: {'OK' if success else 'FAIL'}")
         
-        # 🚨 MICROTURN ENFORCEMENT - DISABLED (can interfere with tool execution)
-        if False:  # Disabled
+        # 🚨 MICROTURN ENFORCEMENT - RUN 1 ONLY
+        run_number = getattr(self._callback_handler, '_run_number', 1) if self._callback_handler else 1
+        print(f"[DASEIN][MICROTURN_DEBUG] run_number={run_number}, callback_handler={self._callback_handler is not None}")
+        if run_number == 1 and self._callback_handler:
             try:
                 proposed_func_name = None
                 print(f"[DASEIN][MICROTURN_DEBUG] Checking result for function call...")
@@ -880,22 +883,27 @@ class CognateProxy:
         # Initialize KPI tracking
         self._last_run_kpis = None
         
-        # Initialize wrapped LLM (will be set by _wrap_agent_llm if applicable)
-        self._wrapped_llm = None
-        
-        # Initialize recreation flag (will be set to True if LangGraph recreation succeeds)
-        self._agent_was_recreated = False
-        
-        # Track which LLM classes have been monkey-patched (to avoid double-patching)
-        self._patched_llm_classes = set()
-        
         # Wrap the agent's LLM with our trace capture wrapper
         self._wrap_agent_llm()
         
-        # CRITICAL: Update langgraph_params to use wrapped LLM for recreation
-        if self._is_langgraph and self._langgraph_params and self._wrapped_llm:
-            print(f" [DASEIN][WRAPPER] Updating langgraph_params to use wrapped LLM")
-            self._langgraph_params['model'] = self._wrapped_llm
+        # Wrap the agent's tools for pipecleaner deduplication
+        print(f"\n{'='*70}")
+        print(f"[DASEIN] Patching tool execution for pipecleaner...")
+        print(f"{'='*70}")
+        try:
+            from .wrappers import wrap_tools_for_pipecleaner
+            verbose = getattr(self._callback_handler, '_verbose', False)
+            success = wrap_tools_for_pipecleaner(self._agent, self._callback_handler, verbose=verbose)
+            if success:
+                print(f"[DASEIN] ✅ Tool execution patched successfully")
+            else:
+                print(f"[DASEIN] ⚠️  Tool execution patching failed")
+            print(f"{'='*70}\n")
+        except Exception as e:
+            print(f"[DASEIN] ❌ ERROR patching tool execution: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"{'='*70}\n")
         
         # Inject universal dead-letter tool
         self._inject_deadletter_tool()
@@ -1229,10 +1237,6 @@ class CognateProxy:
                 else:
                     tool = tool_tuple
                     node_name = None
-                
-                # Unwrap DaseinToolWrapper to get complete metadata (especially args_schema)
-                if hasattr(tool, 'original_tool'):
-                    tool = tool.original_tool
                 
                 tool_meta = {
                     'name': getattr(tool, 'name', str(tool.__class__.__name__)),
@@ -1588,11 +1592,6 @@ Follow these rules when planning your actions."""
             self._agent_was_recreated = True
             self._callback_handler._agent_was_recreated = True
             
-            # CRITICAL: Re-wrap the agent LLM now that we know recreation succeeded
-            # This will switch from monkey-patch to wrapper for WebBrowse agents
-            print(f" [DASEIN][RECREATE] Re-wrapping agent LLM with correct strategy...")
-            self._wrap_agent_llm()
-            
             return True
             
         except Exception as e:
@@ -1698,84 +1697,7 @@ Follow these rules when planning your actions."""
             self._deadletter_fn = None
     
     def _wrap_agent_llm(self):
-        """Conditionally wrap LLM OR monkey-patch based on agent type."""
-        try:
-            # CRITICAL: Detect agent type to choose the right interception strategy
-            # - Deep Research (LangGraph multi-agent with runtime tools) → Monkey-patch ONLY
-            # - SQL agent (NOT LangGraph) → Wrapper ONLY
-            # - Web Browse (LangGraph single-agent, recreates successfully) → Wrapper ONLY
-            
-            is_deep_research = False
-            if self._is_langgraph:
-                # Check if we failed to recreate (means it's deep research multi-agent)
-                # Note: _agent_was_recreated is set in _recreate_langgraph_agent_with_prompt (line 1583)
-                recreation_failed = not hasattr(self, '_agent_was_recreated') or not self._agent_was_recreated
-                if recreation_failed:
-                    is_deep_research = True
-            
-            if is_deep_research:
-                # Deep Research: Use monkey-patch ONLY (no wrapper to avoid double interception)
-                self._vprint(f"[DASEIN][WRAPPER] Using monkey-patch strategy (Deep Research)")
-                self._wrapped_llm = None  # Don't wrap
-                self._monkey_patch_llm_classes()  # Monkey-patch for hotpath interception
-            else:
-                # SQL/Web Browse: Use wrapper ONLY (no monkey-patch to avoid double interception)
-                self._vprint(f"[DASEIN][WRAPPER] Using wrapper strategy (SQL/WebBrowse)")
-                llm = self._find_llm_recursively(self._agent, max_depth=5)
-                if llm:
-                    wrapped_llm = DaseinLLMWrapper(llm, self._callback_handler, verbose=self._verbose)
-                    self._replace_llm_in_structure(self._agent, llm, wrapped_llm, max_depth=5)
-                    self._wrapped_llm = wrapped_llm
-                    self._vprint(f"[DASEIN][WRAPPER] Successfully wrapped {type(llm).__name__} LLM")
-                else:
-                    self._vprint(f"[DASEIN][WRAPPER] Could not find any LLM in agent structure")
-                    self._wrapped_llm = None
-                # Do NOT monkey-patch (would conflict with wrapper)
-            
-        except Exception as e:
-            self._vprint(f"[DASEIN][WRAPPER] Failed to wrap agent LLM: {e}")
-            import traceback
-            traceback.print_exc()
-            self._wrapped_llm = None
-    
-    def _replace_llm_in_structure(self, obj, original_llm, wrapped_llm, max_depth=5, path=""):
-        """Replace the original LLM with wrapped LLM in the structure."""
-        if max_depth <= 0:
-            return
-        
-        # Special handling for RunnableSequence - check steps
-        if hasattr(obj, 'steps') and hasattr(obj, '__iter__'):
-            for i, step in enumerate(obj.steps):
-                if step is original_llm:
-                    self._vprint(f"[DASEIN][WRAPPER] Replacing LLM at {path}.steps[{i}]")
-                    obj.steps[i] = wrapped_llm
-                    return
-                # Check if step has bound attribute (RunnableBinding)
-                if hasattr(step, 'bound') and step.bound is original_llm:
-                    self._vprint(f"[DASEIN][WRAPPER] Replacing LLM at {path}.steps[{i}].bound")
-                    step.bound = wrapped_llm
-                    return
-                # Recursively search in the step
-                self._replace_llm_in_structure(step, original_llm, wrapped_llm, max_depth - 1, f"{path}.steps[{i}]")
-        
-        # Search in attributes
-        for attr_name in dir(obj):
-            if attr_name.startswith('_'):
-                continue
-            try:
-                attr_value = getattr(obj, attr_name)
-                if attr_value is original_llm:
-                    self._vprint(f"[DASEIN][WRAPPER] Replacing LLM at {path}.{attr_name}")
-                    setattr(obj, attr_name, wrapped_llm)
-                    return
-                # Recursively search in the attribute
-                if hasattr(attr_value, '__dict__') or hasattr(attr_value, '__iter__'):
-                    self._replace_llm_in_structure(attr_value, original_llm, wrapped_llm, max_depth - 1, f"{path}.{attr_name}")
-            except:
-                continue
-    
-    def _monkey_patch_llm_classes(self):
-        """Monkey-patch ALL LLM classes found in agent + tools for Pipecleaner deduplication."""
+        """Monkey-patch ALL LLM classes found in agent + tools."""
         try:
             # Find ALL LLMs in agent structure + tools
             print(f"[DASEIN][WRAPPER] Searching for ALL LLMs in agent+tools...")
@@ -1784,45 +1706,34 @@ Follow these rules when planning your actions."""
             # 1. Search in agent
             agent_llm = self._find_llm_recursively(self._agent, max_depth=5)
             if agent_llm:
-                # CRITICAL: If this is a DaseinLLMWrapper, we need to patch the INNER LLM for pipecleaner!
-                # But we skip patching the wrapper itself to avoid double callbacks
-                if isinstance(agent_llm, DaseinLLMWrapper) and hasattr(agent_llm, '_llm'):
-                    print(f"[DASEIN][WRAPPER] Found DaseinLLMWrapper, patching inner LLM: {type(agent_llm._llm).__name__}")
-                    all_llms.append(('agent_inner', agent_llm._llm))
-                else:
-                    all_llms.append(('agent', agent_llm))
+                all_llms.append(('agent', agent_llm))
             
             # 2. Search in tools (where Summary LLM lives!)
             if hasattr(self._agent, 'tools'):
                 for i, tool in enumerate(self._agent.tools or []):
                     tool_llm = self._find_llm_recursively(tool, max_depth=3, path=f"tools[{i}]")
                     if tool_llm:
-                        # Skip if it's a DaseinLLMWrapper (already handles callbacks)
-                        if isinstance(tool_llm, DaseinLLMWrapper):
-                            print(f"[DASEIN][WRAPPER] Found DaseinLLMWrapper in tool - skipping")
-                        else:
-                            all_llms.append((f'tool_{i}_{getattr(tool, "name", "unknown")}', tool_llm))
+                        all_llms.append((f'tool_{i}_{getattr(tool, "name", "unknown")}', tool_llm))
             
             print(f"[DASEIN][WRAPPER] Found {len(all_llms)} LLM(s)")
             for location, llm in all_llms:
                 print(f"[DASEIN][WRAPPER]   - {location}: {type(llm).__name__}")
             
-            # Patch all unique LLM classes (use instance variable to persist across calls)
+            # Patch all unique LLM classes
+            patched_classes = set()
             for location, llm in all_llms:
                 llm_class = type(llm)
-                if llm_class in self._patched_llm_classes:
-                    print(f"[DASEIN][WRAPPER] {llm_class.__name__} already patched (from previous call), skipping")
+                if llm_class in patched_classes:
+                    print(f"[DASEIN][WRAPPER] {llm_class.__name__} already patched for {location}, skipping")
                     continue
                     
                 print(f"[DASEIN][WRAPPER] Patching {llm_class.__name__} (found in {location})...")
                 
                 # Check what methods the LLM class has
-                # CRITICAL: Only patch LOW-LEVEL methods (_generate, _agenerate) to prevent recursion!
-                # High-level methods (invoke, ainvoke) internally call _generate/_agenerate, 
-                # so patching both causes double deduplication.
+                # Only patch TOP-LEVEL methods to avoid double-deduplication from internal calls
                 print(f"[DASEIN][WRAPPER] Checking LLM methods...")
                 methods_to_patch = []
-                for method in ['_generate', '_agenerate']:  # LOW-LEVEL only to prevent recursion
+                for method in ['invoke', 'ainvoke']:  # Only patch user-facing methods, not internal _generate
                     if hasattr(llm_class, method):
                         print(f"[DASEIN][WRAPPER]   - Has {method}")
                         methods_to_patch.append(method)
@@ -1890,8 +1801,6 @@ Follow these rules when planning your actions."""
                                 
                                 # 🔥 PIPECLEANER DEDUPLICATION (only patching top-level methods, always apply)
                                 # Skip depth checks - they don't work with async/parallel execution
-                                # NO RE-ENTRANCY GUARD: We need all Summary calls to batch together
-                                # The embedding model (SentenceTransformer) does NOT use LangChain, so no recursion risk
                                 if callback_handler:
                                     try:
                                         # Extract messages from args based on method signature
@@ -1921,115 +1830,127 @@ Follow these rules when planning your actions."""
                                                     prompt_strings.append(msg)
                                                 else:
                                                     prompt_strings.append(str(msg))
-                                    # HOTPATH DEBUGGING (commented out for production)
-                                    # =============================================================
-                                    # print(f"\n{'='*70}")
-                                    # print(f"[🔥 HOTPATH] {meth_name}() call")
-                                    # print(f"{'='*70}")
-                                    # current_node = getattr(callback_handler, '_current_chain_node', None)
-                                    # current_tool = getattr(callback_handler, '_current_tool_name', None)
-                                    # print(f"[🔥] Current node: {current_node}")
-                                    # print(f"[🔥] Current tool: {current_tool}")
-                                    # print(f"{'='*70}\n")
-                                        
-                                    # =============================================================
-                                    # Extract tools from LLM call kwargs (for filter_search rules)
-                                    # =============================================================
-                                        tools_in_this_call = []
-                                        
-                                    # Extract tool names from kwargs (handles multiple LLM providers' formats)
-                                    # Pattern 1: invocation_params (some providers)
-                                        if 'invocation_params' in kwargs:
-                                            inv_params = kwargs['invocation_params']
-                                            tools_param = inv_params.get('tools') or inv_params.get('functions') or []
-                                            for t in tools_param:
-                                                if isinstance(t, dict):
-                                                # Try: t['name'] or t['function']['name']
-                                                    name = t.get('name') or (t.get('function', {}).get('name') if isinstance(t.get('function'), dict) else None)
-                                                    if name:
-                                                        tools_in_this_call.append(name)
-                                    # Pattern 2: Direct 'tools' key (common)
-                                        elif 'tools' in kwargs:
-                                            tools_param = kwargs.get('tools', [])
-                                            for t in tools_param:
-                                                if isinstance(t, dict):
-                                                # Try: t['name'] or t['function']['name']
-                                                    name = t.get('name') or (t.get('function', {}).get('name') if isinstance(t.get('function'), dict) else None)
-                                                    if name:
-                                                        tools_in_this_call.append(name)
-                                    # Pattern 3: 'functions' key (OpenAI function calling)
-                                        elif 'functions' in kwargs:
-                                            funcs_param = kwargs.get('functions', [])
-                                            for t in funcs_param:
-                                                if isinstance(t, dict):
-                                                    name = t.get('name')
-                                                    if name:
-                                                        tools_in_this_call.append(name)
-                                    # Pattern 4: additional_kwargs (Gemini and other providers store tools here)
-                                        if not tools_in_this_call and messages_to_dedupe:
-                                            msgs_to_check = messages_to_dedupe if isinstance(messages_to_dedupe, list) else [messages_to_dedupe]
-                                            # Check ALL messages for additional_kwargs (not just first)
-                                            for msg in msgs_to_check:
-                                                if hasattr(msg, 'additional_kwargs') and msg.additional_kwargs:
-                                                    add_kwargs = msg.additional_kwargs
-                                                    tools_param = add_kwargs.get('tools') or add_kwargs.get('functions') or []
-                                                    for t in tools_param:
-                                                        if isinstance(t, dict):
-                                                            # Gemini format: {'function_declarations': [{'name': '...'}]}
-                                                            if 'function_declarations' in t:
-                                                                for func in t.get('function_declarations', []):
-                                                                    name = func.get('name')
-                                                                    if name:
-                                                                        tools_in_this_call.append(name)
-                                                            else:
-                                                                name = t.get('name') or (t.get('function', {}).get('name') if isinstance(t.get('function'), dict) else None)
-                                                                if name:
-                                                                    tools_in_this_call.append(name)
-                                                    # Break after first message with tools
-                                                    if tools_in_this_call:
-                                                        break
-                                        
-                                    # Check if any filter_search rules match the tools in this LLM call
-                                        from .pipecleaner import _find_filter_search_rules
-                                        filter_rules = None
-                                        should_dedupe = False
-                                        
-                                        # 🎯 USE EXTRACTED TOOLS from hotpath, not callback state (callback is too late!)
-                                        if hasattr(callback_handler, '_selected_rules') and prompt_strings and tools_in_this_call:
-                                        # Get all filter_search rules (they specify which tools to target via references.tools)
-                                            filter_rules = _find_filter_search_rules('*', callback_handler._selected_rules)
                                             
-                                        # Check if any extracted tool matches rule's target tools
-                                            if filter_rules:
-                                                for rule in filter_rules:
-                                                # Handle both dict and object formats
-                                                    if isinstance(rule, dict):
-                                                        references = rule.get('references', {})
-                                                        rule_tools = references.get('tools', []) if isinstance(references, dict) else []
-                                                    else:
-                                                        references = getattr(rule, 'references', None)
-                                                    # references might be a dict or object, handle both
-                                                        if isinstance(references, dict):
-                                                            rule_tools = references.get('tools', [])
-                                                        elif references:
-                                                            rule_tools = getattr(references, 'tools', [])
+                                            # =============================================================
+                                            # HOTPATH DEBUGGING (commented out for production)
+                                            # =============================================================
+                                            # print(f"\n{'='*70}")
+                                            # print(f"[🔥 HOTPATH FULL DEBUG] {meth_name}() call")
+                                            # print(f"{'='*70}")
+                                            # 
+                                            # # 1. Callback state
+                                            # current_node = getattr(callback_handler, '_current_chain_node', None)
+                                            # current_tool = getattr(callback_handler, '_current_tool_name', None)
+                                            # print(f"[🔥] Current node: {current_node}")
+                                            # print(f"[🔥] Current tool: {current_tool}")
+                                            # 
+                                            # # 2. Tools in this call
+                                            # tools_in_call = []
+                                            # if 'invocation_params' in kwargs:
+                                            #     tools = kwargs['invocation_params'].get('tools') or kwargs['invocation_params'].get('functions') or []
+                                            #     tools_in_call = [t.get('name', t.get('function', {}).get('name', '?')) for t in tools]
+                                            # elif 'tools' in kwargs:
+                                            #     tools_in_call = [t.get('name', '?') for t in kwargs.get('tools', [])]
+                                            # elif 'functions' in kwargs:
+                                            #     tools_in_call = [t.get('name', '?') for t in kwargs.get('functions', [])]
+                                            # print(f"[🔥] Tools in call: {tools_in_call if tools_in_call else 'NONE'}")
+                                            # 
+                                            # # 3. Prompt characteristics
+                                            # prompt_lens = [len(s) for s in prompt_strings]
+                                            # print(f"[🔥] Prompt count: {len(prompt_strings)}")
+                                            # print(f"[🔥] Prompt lengths: {prompt_lens}")
+                                            # 
+                                            # # 4. Kwargs keys (for debugging)
+                                            # print(f"[🔥] Kwargs keys: {list(kwargs.keys())}")
+                                            # 
+                                            # # 5. Messages structure
+                                            # if messages_to_dedupe:
+                                            #     if isinstance(messages_to_dedupe, list):
+                                            #         msg_types = [type(m).__name__ for m in messages_to_dedupe[:3]]
+                                            #         print(f"[🔥] Message types (first 3): {msg_types}")
+                                            #     else:
+                                            #         print(f"[🔥] Messages type: {type(messages_to_dedupe).__name__}")
+                                            # 
+                                            # print(f"{'='*70}\n")
+                                            # 
+                                            # # Show first 200 chars to see the fingerprint
+                                            # if prompt_strings:
+                                            #     first_200 = prompt_strings[0][:200] if len(prompt_strings[0]) > 200 else prompt_strings[0]
+                                            #     print(f"[🔥] Prompt start (200 chars): {first_200}")
+                                            
+                                            # =============================================================
+                                            # Extract tools from LLM call kwargs (for filter_search rules)
+                                            # =============================================================
+                                            tools_in_this_call = []
+                                            
+                                            # Extract tool names from kwargs (handles multiple LLM providers' formats)
+                                            # Pattern 1: invocation_params (some providers)
+                                            if 'invocation_params' in kwargs:
+                                                inv_params = kwargs['invocation_params']
+                                                tools_param = inv_params.get('tools') or inv_params.get('functions') or []
+                                                for t in tools_param:
+                                                    if isinstance(t, dict):
+                                                        # Try: t['name'] or t['function']['name']
+                                                        name = t.get('name') or (t.get('function', {}).get('name') if isinstance(t.get('function'), dict) else None)
+                                                        if name:
+                                                            tools_in_this_call.append(name)
+                                            # Pattern 2: Direct 'tools' key (common)
+                                            elif 'tools' in kwargs:
+                                                tools_param = kwargs.get('tools', [])
+                                                for t in tools_param:
+                                                    if isinstance(t, dict):
+                                                        # Try: t['name'] or t['function']['name']
+                                                        name = t.get('name') or (t.get('function', {}).get('name') if isinstance(t.get('function'), dict) else None)
+                                                        if name:
+                                                            tools_in_this_call.append(name)
+                                            # Pattern 3: 'functions' key (OpenAI function calling)
+                                            elif 'functions' in kwargs:
+                                                funcs_param = kwargs.get('functions', [])
+                                                for t in funcs_param:
+                                                    if isinstance(t, dict):
+                                                        name = t.get('name')
+                                                        if name:
+                                                            tools_in_this_call.append(name)
+                                            
+                                            # Check if any filter_search rules match the tools in this LLM call
+                                            from .pipecleaner import _find_filter_search_rules
+                                            filter_rules = None
+                                            should_dedupe = False
+                                            
+                                            if hasattr(callback_handler, '_selected_rules') and prompt_strings and tools_in_this_call:
+                                                # Get all filter_search rules (they specify which tools to target via references.tools)
+                                                filter_rules = _find_filter_search_rules('*', callback_handler._selected_rules)
+                                                
+                                                # Check if any tool in this call matches rule's target tools
+                                                if filter_rules:
+                                                    for rule in filter_rules:
+                                                        # Handle both dict and object formats
+                                                        if isinstance(rule, dict):
+                                                            references = rule.get('references', {})
+                                                            rule_tools = references.get('tools', []) if isinstance(references, dict) else []
                                                         else:
-                                                            rule_tools = []
-                                                    
-                                                    # Match extracted tools against rule's target tools (case-insensitive)
-                                                    for tool_in_call in tools_in_this_call:
-                                                        if tool_in_call.lower() in [rt.lower() for rt in rule_tools]:
-                                                            should_dedupe = True
+                                                            references = getattr(rule, 'references', None)
+                                                            # references might be a dict or object, handle both
+                                                            if isinstance(references, dict):
+                                                                rule_tools = references.get('tools', [])
+                                                            elif references:
+                                                                rule_tools = getattr(references, 'tools', [])
+                                                            else:
+                                                                rule_tools = []
+                                                        
+                                                        for tool_in_call in tools_in_this_call:
+                                                            if tool_in_call.lower() in [rt.lower() for rt in rule_tools]:
+                                                                should_dedupe = True
+                                                                break
+                                                        if should_dedupe:
                                                             break
-                                                    if should_dedupe:
-                                                        break
-                                        
+                                            
                                             if should_dedupe:
                                                     # Deduplicate each prompt
                                                     from .pipecleaner import get_or_create_corpus
                                                     import hashlib
                                                     corpus = get_or_create_corpus(callback_handler.run_id, verbose=callback_handler._verbose)
-                                                
+                                                    
                                                     deduplicated_strings = []
                                                     for i, prompt_str in enumerate(prompt_strings):
                                                         if len(prompt_str) < 2500:
@@ -2073,14 +1994,49 @@ Follow these rules when planning your actions."""
                                 try:
                                     result = await orig_method(self_llm, *args, **kwargs)
                                     
-                                    # 🚨 MICROTURN ENFORCEMENT - DISABLED
-                                    # Microturn can interfere with tool execution, so it's disabled
-                                    # TODO: Re-enable with proper gating if needed for specific use cases
+                                    # 🚨 MICROTURN ENFORCEMENT - Only if tool_end rules exist
+                                    in_microturn = in_microturn_getter()
+                                    if not in_microturn:
+                                        run_number = getattr(callback_handler, '_run_number', 1) if callback_handler else 1
+                                        if run_number == 1 and callback_handler:
+                                            # GATE: Only run microturn if tool_end rules exist
+                                            from .microturn import has_tool_end_rules, extract_proposed_function_calls, extract_tool_call_signatures
+                                            
+                                            if not has_tool_end_rules(callback_handler):
+                                                # No tool_end rules - silently skip microturn
+                                                pass
+                                            else:
+                                                # Check if we've already processed these specific tool calls (prevents duplicate checks as call stack unwinds)
+                                                temp_names, temp_msg = extract_proposed_function_calls(result)
+                                                if temp_msg:
+                                                    temp_sigs = extract_tool_call_signatures(temp_msg)
+                                                    tool_calls_sig = f"{','.join(sorted(temp_sigs.values()))}" if temp_sigs else "empty"
+                                                else:
+                                                    tool_calls_sig = f"{','.join(sorted(temp_names))}" if temp_names else "empty"
+                                                
+                                                if not hasattr(_patch_depth, 'processed_tool_calls'):
+                                                    _patch_depth.processed_tool_calls = set()
+                                                
+                                                if tool_calls_sig not in _patch_depth.processed_tool_calls:
+                                                    # Mark these specific tool calls as processed
+                                                    _patch_depth.processed_tool_calls.add(tool_calls_sig)
+                                                
+                                                    # Run microturn enforcement (for tool CALLS)
+                                                    from .microturn import run_microturn_enforcement
+                                                    try:
+                                                        await run_microturn_enforcement(
+                                                            result=result,
+                                                            callback_handler=callback_handler,
+                                                            self_llm=self_llm,
+                                                            patch_depth=_patch_depth,
+                                                            use_llm_microturn=USE_LLM_MICROTURN
+                                                        )
+                                                    except Exception as e:
+                                                        print(f"[DASEIN][MICROTURN] ⚠️ Microturn error: {e}")
                                     
                                     return result
                                 finally:
-                                    # Restore depth on exit
-                                    depth_tracker.value = depth
+                                    depth_tracker.value = depth  # Restore depth on exit
                                     # Clear processed tool calls set when returning to entry point (prevents memory leak)
                                     if depth == 0:
                                         if hasattr(_patch_depth, 'processed_tool_calls'):
@@ -2089,8 +2045,6 @@ Follow these rules when planning your actions."""
                                             _patch_depth.seen_tool_signatures.clear()
                                         if hasattr(_patch_depth, 'tool_result_cache'):
                                             _patch_depth.tool_result_cache.clear()
-                            
-                            return patched_method
                         else:
                             def patched_method(self_llm, *args, **kwargs):
                                 # Track depth to find the leaf method
@@ -2107,15 +2061,9 @@ Follow these rules when planning your actions."""
                                     if current_depth > max_depth_getter():
                                         max_depth_setter(current_depth)
                                 
-                                # 🔥 PIPECLEANER DEDUPLICATION (use thread-local for per-thread re-entrancy guard!)
-                                # CRITICAL: depth_tracker is shared, so use thread-local which is per-thread
-                                import threading
-                                if not hasattr(_patch_depth, '_dedupe_guard_sync'):
-                                    _patch_depth._dedupe_guard_sync = threading.local()
-                                
-                                in_dedupe = getattr(_patch_depth._dedupe_guard_sync, 'value', False)
-                                if callback_handler and not in_dedupe:
-                                    _patch_depth._dedupe_guard_sync.value = True
+                                # 🔥 PIPECLEANER DEDUPLICATION (only patching top-level methods, always apply)
+                                # Skip depth checks - they don't work with async/parallel execution
+                                if callback_handler:
                                     try:
                                         # Extract messages from args based on method signature
                                         messages_to_dedupe = None
@@ -2228,12 +2176,11 @@ Follow these rules when planning your actions."""
                                             filter_rules = None
                                             should_dedupe = False
                                             
-                                            # 🎯 USE EXTRACTED TOOLS from hotpath, not callback state (callback is too late!)
                                             if hasattr(callback_handler, '_selected_rules') and prompt_strings and tools_in_this_call:
                                                 # Get all filter_search rules (they specify which tools to target via references.tools)
                                                 filter_rules = _find_filter_search_rules('*', callback_handler._selected_rules)
                                                 
-                                                # Check if any extracted tool matches rule's target tools
+                                                # Check if any tool in this call matches rule's target tools
                                                 if filter_rules:
                                                     for rule in filter_rules:
                                                         # Handle both dict and object formats
@@ -2250,7 +2197,6 @@ Follow these rules when planning your actions."""
                                                             else:
                                                                 rule_tools = []
                                                         
-                                                        # Match extracted tools against rule's target tools (case-insensitive)
                                                         for tool_in_call in tools_in_this_call:
                                                             if tool_in_call.lower() in [rt.lower() for rt in rule_tools]:
                                                                 should_dedupe = True
@@ -2312,19 +2258,18 @@ Follow these rules when planning your actions."""
                                         traceback.print_exc()
                                 
                                 try:
-                                    # NOTE: Manual callback injection DISABLED - DaseinLLMWrapper handles callbacks
-                                    # The patched methods ONLY do pipecleaner deduplication, not callbacks
                                     result = orig_method(self_llm, *args, **kwargs)
                                     
-                                    # 🚨 MICROTURN ENFORCEMENT - DISABLED (can interfere with tool execution)
-                                    # TODO: Re-enable with proper gating if needed
+                                    # 🚨 MICROTURN ENFORCEMENT - Only at the DEEPEST level (max depth)
+                                    if current_depth == max_depth_getter():
+                                        run_number = getattr(callback_handler, '_run_number', 1) if callback_handler else 1
+                                        if run_number == 1 and callback_handler:
+                                            print(f"[DASEIN][MICROTURN_DEBUG] 🎯 DEEPEST METHOD: {meth_name} (depth={current_depth}) - Checking result...")
+                                            print(f"[DASEIN][MICROTURN_DEBUG] Result type: {type(result)}")
+                                            # TODO: Add full microturn logic here
                                     
                                     return result
                                 finally:
-                                    # CRITICAL: Reset re-entrancy guard AFTER LLM call completes
-                                    if hasattr(_patch_depth, '_dedupe_guard_sync'):
-                                        _patch_depth._dedupe_guard_sync.value = False
-                                    
                                     depth_tracker.value = depth  # Restore depth on exit
                                     # Clear processed tool calls set when returning to entry point (prevents memory leak)
                                     if depth == 0:
@@ -2341,14 +2286,14 @@ Follow these rules when planning your actions."""
                     # Mark and apply the patch
                     patched_method._dasein_patched = True
                     setattr(llm_class, method_name, patched_method)
-                    print(f"[DASEIN][WRAPPER] Patched {method_name}")
+                    print(f"[DASEIN][WRAPPER] ✅ Patched {method_name}")
                 
                 # Mark this class as patched
-                self._patched_llm_classes.add(llm_class)
+                patched_classes.add(llm_class)
                 self._wrapped_llm = llm
                 print(f"[DASEIN][WRAPPER] Successfully patched {len(methods_to_patch)} methods in {llm_class.__name__}")
             
-            print(f"[DASEIN][WRAPPER] Finished patching LLM classes (total patched across all calls: {len(self._patched_llm_classes)})")
+            print(f"[DASEIN][WRAPPER] Finished patching {len(patched_classes)} unique LLM class(es)")
             return
         except Exception as e:
             print(f"[DASEIN][WRAPPER] Failed to wrap agent LLM: {e}")
@@ -3135,23 +3080,6 @@ Follow these rules when planning your actions."""
         # Set selected rules in callback handler for injection
         self._callback_handler.set_selected_rules(selected_rules)
         
-        # [TEST RULE] Inject test rule to verify pipecleaner FAISS integration
-        # COMMENTED OUT - Use real rules from rule synthesis instead
-        # if True:  # Set to False to disable test rule
-        #     from types import SimpleNamespace
-        #     test_rule = SimpleNamespace(
-        #         id="test_faiss_rule_sync",
-        #         target_step_type="llm_start",
-        #         advice_text="FILTER SEARCH: Apply deduplication to search results using FAISS-accelerated similarity computation",
-        #         references=SimpleNamespace(
-        #             tools=["tavily_search", "Summary", "summary"]  # tavily_search because Summary is called from within it
-        #         )
-        #     )
-        #     print(f"[TEST RULE SYNC] Injecting test rule AFTER pre-run (should trigger pipecleaner)")
-        #     selected_rules.append(test_rule)
-        #     self._callback_handler.set_selected_rules(selected_rules)
-        #     print(f"[TEST RULE SYNC] Test rule injected, total rules: {len(selected_rules)}")
-        
         # Use micro-turn injection at tool start (the proper approach)
         # Wrap agent tools to apply micro-turn modifications
         self._wrap_agent_tools()
@@ -3207,23 +3135,6 @@ Follow these rules when planning your actions."""
         
         # Set selected rules in callback handler for injection
         self._callback_handler.set_selected_rules(selected_rules)
-        
-        # [TEST RULE] Inject test rule to verify pipecleaner FAISS integration
-        # COMMENTED OUT - Use real rules from rule synthesis instead
-        # if True:  # Set to False to disable test rule
-        #     from types import SimpleNamespace
-        #     test_rule = SimpleNamespace(
-        #         id="test_faiss_rule_async",
-        #         target_step_type="llm_start",
-        #         advice_text="FILTER SEARCH: Apply deduplication to search results using FAISS-accelerated similarity computation",
-        #         references=SimpleNamespace(
-        #             tools=["Summary", "summary"]  # Only Summary, not tavily_search
-        #         )
-        #     )
-        #     print(f"[TEST RULE ASYNC] Injecting test rule AFTER pre-run (should trigger pipecleaner)")
-        #     selected_rules.append(test_rule)
-        #     self._callback_handler.set_selected_rules(selected_rules)
-        #     print(f"[TEST RULE ASYNC] Test rule injected, total rules: {len(selected_rules)}")
         
         # Use micro-turn injection at tool start (the proper approach)
         # Wrap agent tools to apply micro-turn modifications
@@ -3848,11 +3759,7 @@ Follow these rules when planning your actions."""
                     print(f"[DASEIN] 🔧 Pre-loading embedding model for pipecleaner (found filter search rules)...")
                     from .pipecleaner import _get_embedding_model
                     try:
-                        # Suppress protobuf warnings from sentence-transformers
-                        import warnings
-                        with warnings.catch_warnings():
-                            warnings.filterwarnings('ignore', category=Warning)
-                            _get_embedding_model()  # Warm up the model
+                        _get_embedding_model()  # Warm up the model
                         print(f"[DASEIN] ✅ Embedding model pre-loaded successfully")
                     except Exception as e:
                         print(f"[DASEIN] ⚠️  Failed to pre-load embedding model: {e}")

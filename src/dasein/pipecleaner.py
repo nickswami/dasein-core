@@ -211,7 +211,8 @@ class RunScopedCorpus:
         
         # Batching state
         self.batch_queue: List[str] = []  # [prompt_ids] waiting for barrier
-        self.batch_lock = threading.Lock()
+        self.batch_lock = threading.Lock()  # Protects batch_queue, batch_timer, etc.
+        self.processing_lock = threading.Lock()  # CRITICAL: Ensures only ONE batch processes at a time
         self.batch_timer: Optional[threading.Timer] = None
         self.batch_start_time: Optional[float] = None
         self.barrier_duration: float = 5.0  # Start at 5s (min wait)
@@ -436,334 +437,336 @@ class RunScopedCorpus:
     
     def _process_batch(self):
         """Process current batch: cross-prompt dedupe, entity coverage check, emit (synchronous)."""
-        with self.batch_lock:
-            if not self.batch_queue:
-                # No prompts to process, just return (shouldn't happen)
-                return
+        # CRITICAL: Acquire processing lock to prevent multiple batches from processing simultaneously
+        with self.processing_lock:
+            with self.batch_lock:
+                if not self.batch_queue:
+                    # No prompts to process, just return (shouldn't happen)
+                    return
             
-            batch_prompts = self.batch_queue.copy()
-            self.batch_queue.clear()
-            self.batch_timer = None
+                batch_prompts = self.batch_queue.copy()
+                self.batch_queue.clear()
+                self.batch_timer = None
             
-            batch_duration_ms = (time.time() - self.batch_start_time) * 1000
-            self.telemetry.barrier_times.append(batch_duration_ms)
-            self.telemetry.batches_processed += 1
+                batch_duration_ms = (time.time() - self.batch_start_time) * 1000
+                self.telemetry.barrier_times.append(batch_duration_ms)
+                self.telemetry.batches_processed += 1
             
-            # Always show batch summary (key metric)
-            print(f"\n[CORPUS] 🔄 Processing batch: {len(batch_prompts)} prompts, barrier={batch_duration_ms:.0f}ms")
+                # Always show batch summary (key metric)
+                print(f"\n[CORPUS] 🔄 Processing batch: {len(batch_prompts)} prompts, barrier={batch_duration_ms:.0f}ms")
         
-        # Step 0: Compute embeddings for NEW prompts in this batch (BATCHED operation!)
-        # This is done ONCE for the entire batch, allowing parallel arrivals
-        _vprint(f"[CORPUS] 🧮 Computing embeddings for {len(batch_prompts)} new prompts...", self.verbose)
-        model = _get_embedding_model()
+            # Step 0: Compute embeddings for NEW prompts in this batch (BATCHED operation!)
+            # This is done ONCE for the entire batch, allowing parallel arrivals
+            _vprint(f"[CORPUS] 🧮 Computing embeddings for {len(batch_prompts)} new prompts...", self.verbose)
+            model = _get_embedding_model()
         
-        for prompt_id in batch_prompts:
-            prompt_state = self.prompt_registry[prompt_id]
+            for prompt_id in batch_prompts:
+                prompt_state = self.prompt_registry[prompt_id]
             
-            if not prompt_state.cluster_ids:  # Only process if not yet clustered
-                # Compute embeddings for all sentences in this prompt (batch operation)
-                sentence_embeddings = model.encode(prompt_state.sentences, show_progress_bar=False, normalize_embeddings=True)
+                if not prompt_state.cluster_ids:  # Only process if not yet clustered
+                    # Compute embeddings for all sentences in this prompt (batch operation)
+                    sentence_embeddings = model.encode(prompt_state.sentences, show_progress_bar=False, normalize_embeddings=True)
                 
-                # Match/create clusters for each sentence
-                cluster_ids = []
-                for i, sentence in enumerate(prompt_state.sentences):
-                    # Compute salience
-                    salience = len(sentence) / 100.0
-                    salience += len(re.findall(r'\b[A-Z][a-z]+', sentence)) * 0.1
+                    # Match/create clusters for each sentence
+                    cluster_ids = []
+                    for i, sentence in enumerate(prompt_state.sentences):
+                        # Compute salience
+                        salience = len(sentence) / 100.0
+                        salience += len(re.findall(r'\b[A-Z][a-z]+', sentence)) * 0.1
                     
-                    # Extract entities
-                    entities, numbers = extract_entities_regex(sentence)
+                        # Extract entities
+                        entities, numbers = extract_entities_regex(sentence)
                     
-                    # Match against existing clusters
-                    cluster_id = self.find_matching_cluster(0, sentence, sentence_embeddings[i])
+                        # Match against existing clusters
+                        cluster_id = self.find_matching_cluster(0, sentence, sentence_embeddings[i])
                     
-                    if cluster_id is None:
-                        # Create new cluster
-                        with self.batch_lock:
-                            cluster_id = self._generate_cluster_id()
-                            simhash = compute_simhash(sentence)
+                        if cluster_id is None:
+                            # Create new cluster
+                            with self.batch_lock:
+                                cluster_id = self._generate_cluster_id()
+                                simhash = compute_simhash(sentence)
                             
-                            cluster = SentenceCluster(
-                                cluster_id=cluster_id,
-                                canonical_sentence=sentence,
-                                owner_prompt_id=prompt_id,
-                                simhash=simhash,
-                                salience=salience,
-                                entities=entities | numbers,
-                                first_seen_seq=self.next_seq,
-                                length=len(sentence),
-                                embedding=sentence_embeddings[i]
-                            )
+                                cluster = SentenceCluster(
+                                    cluster_id=cluster_id,
+                                    canonical_sentence=sentence,
+                                    owner_prompt_id=prompt_id,
+                                    simhash=simhash,
+                                    salience=salience,
+                                    entities=entities | numbers,
+                                    first_seen_seq=self.next_seq,
+                                    length=len(sentence),
+                                    embedding=sentence_embeddings[i]
+                                )
                             
-                            self.clusters[cluster_id] = cluster
-                            self.next_seq += 1
-                            self.telemetry.clusters_total += 1
+                                self.clusters[cluster_id] = cluster
+                                self.next_seq += 1
+                                self.telemetry.clusters_total += 1
                     
-                    cluster_ids.append(cluster_id)
+                        cluster_ids.append(cluster_id)
                 
-                # Update prompt state with cluster_ids
-                prompt_state.cluster_ids = cluster_ids
+                    # Update prompt state with cluster_ids
+                    prompt_state.cluster_ids = cluster_ids
         
-        _vprint(f"[CORPUS] ✅ Embeddings computed and clusters assigned", self.verbose)
+            _vprint(f"[CORPUS] ✅ Embeddings computed and clusters assigned", self.verbose)
         
-        # Step 1: Collect ALL sentences from THE ENTIRE RUN (not just current batch!)
-        # This is critical for true run-scoped deduplication
-        all_sentences = []
-        sentence_to_prompt = {}  # Map sentence_id → (prompt_id, index)
-        locked_sentences = set()  # Sentences from previous batches (already emitted, can't remove)
+            # Step 1: Collect ALL sentences from THE ENTIRE RUN (not just current batch!)
+            # This is critical for true run-scoped deduplication
+            all_sentences = []
+            sentence_to_prompt = {}  # Map sentence_id → (prompt_id, index)
+            locked_sentences = set()  # Sentences from previous batches (already emitted, can't remove)
         
-        # Iterate over ALL prompts in registry (including previous batches)
-        for prompt_id, prompt_state in self.prompt_registry.items():
-            is_previous_batch = prompt_id not in batch_prompts
+            # Iterate over ALL prompts in registry (including previous batches)
+            for prompt_id, prompt_state in self.prompt_registry.items():
+                is_previous_batch = prompt_id not in batch_prompts
             
-            for idx, (sentence_text, cluster_id) in enumerate(zip(prompt_state.sentences, prompt_state.cluster_ids)):
-                cluster = self.clusters.get(cluster_id)
-                if not cluster:
-                    continue
+                for idx, (sentence_text, cluster_id) in enumerate(zip(prompt_state.sentences, prompt_state.cluster_ids)):
+                    cluster = self.clusters.get(cluster_id)
+                    if not cluster:
+                        continue
                 
-                # Create Sentence object for greedy algorithm
-                sent_id = f"{prompt_id}_{idx}"
-                sent_obj = Sentence(
-                    id=sent_id,
-                    text=sentence_text,
-                    embedding=cluster.embedding,
-                    entities=cluster.entities,  # Keep ALL entities for accurate coverage tracking
-                    numbers=set(),  # Already in entities
-                    salience=cluster.salience,
-                    position=cluster.first_seen_seq
-                )
-                all_sentences.append(sent_obj)
-                sentence_to_prompt[sent_id] = (prompt_id, idx)
+                    # Create Sentence object for greedy algorithm
+                    sent_id = f"{prompt_id}_{idx}"
+                    sent_obj = Sentence(
+                        id=sent_id,
+                        text=sentence_text,
+                        embedding=cluster.embedding,
+                        entities=cluster.entities,  # Keep ALL entities for accurate coverage tracking
+                        numbers=set(),  # Already in entities
+                        salience=cluster.salience,
+                        position=cluster.first_seen_seq
+                    )
+                    all_sentences.append(sent_obj)
+                    sentence_to_prompt[sent_id] = (prompt_id, idx)
                 
-                # Lock sentences from previous batches (already emitted to user)
-                if is_previous_batch:
-                    locked_sentences.add(sent_id)
+                    # Lock sentences from previous batches (already emitted to user)
+                    if is_previous_batch:
+                        locked_sentences.add(sent_id)
         
-        _vprint(f"[CORPUS] 🌐 Run-scoped MIS: {len(all_sentences)} total sentences ({len(locked_sentences)} locked from previous batches, {len(all_sentences)-len(locked_sentences)} new)", self.verbose)
-        _vprint(f"[CORPUS] 🧮 Running greedy max-independent-set on {len(all_sentences)} sentences", self.verbose)
+            _vprint(f"[CORPUS] 🌐 Run-scoped MIS: {len(all_sentences)} total sentences ({len(locked_sentences)} locked from previous batches, {len(all_sentences)-len(locked_sentences)} new)", self.verbose)
+            _vprint(f"[CORPUS] 🧮 Running greedy max-independent-set on {len(all_sentences)} sentences", self.verbose)
         
-        # Step 2: Compute degree map (needed for isolates pass later)
-        degree_map = {}
-        for sent in all_sentences:
-            degree = 0
-            for other in all_sentences:
-                if sent.id != other.id:
-                    if are_sentences_similar(sent, other, semantic_threshold=0.60):
-                        degree += 1
-            degree_map[sent.id] = degree
-        
-        # Sanity checks
-        isolates_before = [s for s in all_sentences if degree_map[s.id] == 0]
-        non_isolates = [s for s in all_sentences if degree_map[s.id] > 0]
-        pct_isolates = len(isolates_before) / len(all_sentences) * 100 if all_sentences else 0
-        avg_degree_non_iso = sum(degree_map[s.id] for s in non_isolates) / len(non_isolates) if non_isolates else 0
-        print(f"[CORPUS] 📊 Graph: isolates={pct_isolates:.1f}% (expect <20%), non-isolate avg degree={avg_degree_non_iso:.1f} (expect >3)")
-        
-        # Step 3: Run greedy maximum-independent-set selection
-        # Start with LOCKED sentences (from previous batches, already emitted)
-        # Then run MIS only on NEW sentences (current batch)
-        selected_sentences = [s for s in all_sentences if s.id in locked_sentences]
-        selected_ids = locked_sentences.copy()
-        
-        print(f"[CORPUS] 🔒 Pre-seeded MIS with {len(locked_sentences)} locked sentences from previous batches")
-        
-        # Now run MIS on NEW sentences only (exclude locked)
-        new_sentences = [s for s in all_sentences if s.id not in locked_sentences]
-        
-        if new_sentences:
-            # Run MIS on new sentences, considering locked ones as neighbors
-            new_selected = greedy_max_independent_set(
-                new_sentences,
-                similarity_threshold=0.60,
-                verbose=False,  # Set to True for debugging
-                precomputed_degree_map=degree_map  # Pass precomputed degrees
-            )
-            
-            # Add newly selected sentences
-            selected_sentences.extend(new_selected)
-            selected_ids.update(s.id for s in new_selected)
-        
-        _vprint(f"[CORPUS] ✅ MIS complete: {len(selected_ids)} total kept ({len(locked_sentences)} locked + {len(selected_ids)-len(locked_sentences)} new)", self.verbose)
-        
-        # Step 3: Compute NODE COVERAGE (align universe for backfill)
-        # covered_nodes = S ∪ N(S) (selected + their neighbors)
-        covered_nodes = set(selected_ids)
-        sentence_map = {s.id: s for s in all_sentences}
-        
-        for selected_id in selected_ids:
-            selected_sent = sentence_map[selected_id]
-            # Add all neighbors (similar nodes)
-            for other in all_sentences:
-                if other.id != selected_id:
-                    if are_sentences_similar(selected_sent, other, semantic_threshold=0.60):
-                        covered_nodes.add(other.id)
-        
-        total_nodes = len(all_sentences)
-        node_coverage_before = len(covered_nodes) / total_nodes if total_nodes > 0 else 0.0
-        
-        _vprint(f"[CORPUS] 📊 After MIS: nodes={len(selected_ids)}/{total_nodes} kept, coverage (S∪N(S))={len(covered_nodes)}/{total_nodes} ({node_coverage_before*100:.1f}%)", self.verbose)
-        
-        # Step 4: Backfill = GREEDY SET COVER over NODES (no independence constraint!)
-        # Goal: Maximize node coverage (S ∪ N(S)) by re-adding removed nodes with highest gain
-        # gain(u) = |({u} ∪ N(u)) \ covered_nodes|
-        backfill_added = 0
-        isolates_added = 0
-        target_coverage = 0.90  # 90% node coverage target
-        
-        if node_coverage_before < target_coverage:
-            uncovered_count = total_nodes - len(covered_nodes)
-            _vprint(f"[CORPUS] 🔧 Backfill: {uncovered_count} uncovered nodes, targeting {target_coverage*100:.0f}% coverage", self.verbose)
-            
-            # Get ALL removed sentences (candidates for backfill)
-            removed_sentences = [sent for sent in all_sentences if sent.id not in selected_ids]
-            
-            # Helper: compute node gain for a candidate
-            def compute_node_gain(sent):
-                """Compute how many uncovered nodes this sentence + its neighbors would cover."""
-                candidate_coverage = {sent.id}
-                # Add neighbors
+            # Step 2: Compute degree map (needed for isolates pass later)
+            degree_map = {}
+            for sent in all_sentences:
+                degree = 0
                 for other in all_sentences:
-                    if other.id != sent.id:
+                    if sent.id != other.id:
                         if are_sentences_similar(sent, other, semantic_threshold=0.60):
-                            candidate_coverage.add(other.id)
-                # Gain = new nodes not already covered
-                return len(candidate_coverage - covered_nodes)
+                            degree += 1
+                degree_map[sent.id] = degree
+        
+            # Sanity checks
+            isolates_before = [s for s in all_sentences if degree_map[s.id] == 0]
+            non_isolates = [s for s in all_sentences if degree_map[s.id] > 0]
+            pct_isolates = len(isolates_before) / len(all_sentences) * 100 if all_sentences else 0
+            avg_degree_non_iso = sum(degree_map[s.id] for s in non_isolates) / len(non_isolates) if non_isolates else 0
+            print(f"[CORPUS] 📊 Graph: isolates={pct_isolates:.1f}% (expect <20%), non-isolate avg degree={avg_degree_non_iso:.1f} (expect >3)")
+        
+            # Step 3: Run greedy maximum-independent-set selection
+            # Start with LOCKED sentences (from previous batches, already emitted)
+            # Then run MIS only on NEW sentences (current batch)
+            selected_sentences = [s for s in all_sentences if s.id in locked_sentences]
+            selected_ids = locked_sentences.copy()
+        
+            print(f"[CORPUS] 🔒 Pre-seeded MIS with {len(locked_sentences)} locked sentences from previous batches")
+        
+            # Now run MIS on NEW sentences only (exclude locked)
+            new_sentences = [s for s in all_sentences if s.id not in locked_sentences]
+        
+            if new_sentences:
+                # Run MIS on new sentences, considering locked ones as neighbors
+                new_selected = greedy_max_independent_set(
+                    new_sentences,
+                    similarity_threshold=0.60,
+                    verbose=False,  # Set to True for debugging
+                    precomputed_degree_map=degree_map  # Pass precomputed degrees
+                )
             
-            # Debug: Print top-5 candidates by gain (first iteration only)
-            if removed_sentences:
-                gains = [(sent, compute_node_gain(sent)) for sent in removed_sentences[:20]]  # Sample first 20 for speed
-                gains.sort(key=lambda x: x[1], reverse=True)
-                _vprint(f"[CORPUS]   Top-5 backfill candidates by gain:", self.verbose)
-                for sent, gain in gains[:5]:
-                    _vprint(f"     gain={gain}: '{sent.text[:60]}...'", self.verbose)
-            
-            # GREEDY SET COVER: repeatedly pick sentence with max gain
-            iteration = 0
-            while node_coverage_before < target_coverage and removed_sentences and iteration < 100:
-                # Find best candidate
-                best_sent = None
-                best_gain = 0
-                
-                for sent in removed_sentences:
-                    gain = compute_node_gain(sent)
-                    if gain > best_gain:
-                        best_gain = gain
-                        best_sent = sent
-                
-                if best_gain == 0:
-                    _vprint(f"[CORPUS]   Backfill: all remaining candidates have gain=0, stopping", self.verbose)
-                    break
-                
-                # Add best sentence back
-                selected_ids.add(best_sent.id)
-                selected_sentences.append(best_sent)
-                
-                # Update covered_nodes: add this node + its neighbors
-                covered_nodes.add(best_sent.id)
+                # Add newly selected sentences
+                selected_sentences.extend(new_selected)
+                selected_ids.update(s.id for s in new_selected)
+        
+            _vprint(f"[CORPUS] ✅ MIS complete: {len(selected_ids)} total kept ({len(locked_sentences)} locked + {len(selected_ids)-len(locked_sentences)} new)", self.verbose)
+        
+            # Step 3: Compute NODE COVERAGE (align universe for backfill)
+            # covered_nodes = S ∪ N(S) (selected + their neighbors)
+            covered_nodes = set(selected_ids)
+            sentence_map = {s.id: s for s in all_sentences}
+        
+            for selected_id in selected_ids:
+                selected_sent = sentence_map[selected_id]
+                # Add all neighbors (similar nodes)
                 for other in all_sentences:
-                    if other.id != best_sent.id:
-                        if are_sentences_similar(best_sent, other, semantic_threshold=0.60):
+                    if other.id != selected_id:
+                        if are_sentences_similar(selected_sent, other, semantic_threshold=0.60):
                             covered_nodes.add(other.id)
-                
-                removed_sentences.remove(best_sent)
-                backfill_added += 1
-                
-                # Update coverage
-                node_coverage_before = len(covered_nodes) / total_nodes
-                iteration += 1
-                
-                if backfill_added <= 5:
-                    _vprint(f"[CORPUS]   ✅ Backfill +{best_gain} nodes: '{best_sent.text[:60]}...' (coverage now {node_coverage_before*100:.1f}%)", self.verbose)
+        
+            total_nodes = len(all_sentences)
+            node_coverage_before = len(covered_nodes) / total_nodes if total_nodes > 0 else 0.0
+        
+            _vprint(f"[CORPUS] 📊 After MIS: nodes={len(selected_ids)}/{total_nodes} kept, coverage (S∪N(S))={len(covered_nodes)}/{total_nodes} ({node_coverage_before*100:.1f}%)", self.verbose)
+        
+            # Step 4: Backfill = GREEDY SET COVER over NODES (no independence constraint!)
+            # Goal: Maximize node coverage (S ∪ N(S)) by re-adding removed nodes with highest gain
+            # gain(u) = |({u} ∪ N(u)) \ covered_nodes|
+            backfill_added = 0
+            isolates_added = 0
+            target_coverage = 0.90  # 90% node coverage target
+        
+            if node_coverage_before < target_coverage:
+                uncovered_count = total_nodes - len(covered_nodes)
+                _vprint(f"[CORPUS] 🔧 Backfill: {uncovered_count} uncovered nodes, targeting {target_coverage*100:.0f}% coverage", self.verbose)
             
-            _vprint(f"[CORPUS] 📈 After backfill: +{backfill_added} sentences, node coverage {node_coverage_before*100:.1f}%)", self.verbose)
+                # Get ALL removed sentences (candidates for backfill)
+                removed_sentences = [sent for sent in all_sentences if sent.id not in selected_ids]
             
-            # Step 5: ISOLATES PASS - add uncovered degree=0 nodes
-            # These are unique nodes with no similar neighbors
-            uncovered_isolates = [sent for sent in all_sentences 
-                                  if sent.id not in covered_nodes and degree_map[sent.id] == 0]
+                # Helper: compute node gain for a candidate
+                def compute_node_gain(sent):
+                    """Compute how many uncovered nodes this sentence + its neighbors would cover."""
+                    candidate_coverage = {sent.id}
+                    # Add neighbors
+                    for other in all_sentences:
+                        if other.id != sent.id:
+                            if are_sentences_similar(sent, other, semantic_threshold=0.60):
+                                candidate_coverage.add(other.id)
+                    # Gain = new nodes not already covered
+                    return len(candidate_coverage - covered_nodes)
             
-            if uncovered_isolates:
-                _vprint(f"[CORPUS] 🔧 Isolates pass: {len(uncovered_isolates)} uncovered isolates (degree=0)", self.verbose)
+                # Debug: Print top-5 candidates by gain (first iteration only)
+                if removed_sentences:
+                    gains = [(sent, compute_node_gain(sent)) for sent in removed_sentences[:20]]  # Sample first 20 for speed
+                    gains.sort(key=lambda x: x[1], reverse=True)
+                    _vprint(f"[CORPUS]   Top-5 backfill candidates by gain:", self.verbose)
+                    for sent, gain in gains[:5]:
+                        _vprint(f"     gain={gain}: '{sent.text[:60]}...'", self.verbose)
+            
+                # GREEDY SET COVER: repeatedly pick sentence with max gain
+                iteration = 0
+                while node_coverage_before < target_coverage and removed_sentences and iteration < 100:
+                    # Find best candidate
+                    best_sent = None
+                    best_gain = 0
                 
-                for sent in uncovered_isolates:
-                    if node_coverage_before >= target_coverage:
+                    for sent in removed_sentences:
+                        gain = compute_node_gain(sent)
+                        if gain > best_gain:
+                            best_gain = gain
+                            best_sent = sent
+                
+                    if best_gain == 0:
+                        _vprint(f"[CORPUS]   Backfill: all remaining candidates have gain=0, stopping", self.verbose)
                         break
-                    selected_ids.add(sent.id)
-                    covered_nodes.add(sent.id)
-                    isolates_added += 1
-                    node_coverage_before = len(covered_nodes) / total_nodes
-                    
-                    if isolates_added <= 5:
-                        _vprint(f"[CORPUS]   ✅ Isolate: '{sent.text[:60]}...'", self.verbose)
                 
-                if isolates_added > 0:
-                    _vprint(f"[CORPUS] 📈 After isolates: +{isolates_added} sentences, node coverage {node_coverage_before*100:.1f}%", self.verbose)
-        
-        # Final coverage stats (NODE universe)
-        final_selected = len(selected_ids)
-        final_covered_nodes = len(covered_nodes)
-        final_node_coverage = final_covered_nodes / total_nodes if total_nodes > 0 else 0.0
-        
-        # Assert denominator is |V| (all nodes, no filtering)
-        assert total_nodes == len(all_sentences), f"Denominator mismatch: {total_nodes} != {len(all_sentences)}"
-        
-        _vprint(f"[CORPUS] ✅ Final: kept={final_selected}/{total_nodes}, covered (S∪N(S))={final_covered_nodes}/{total_nodes} ({final_node_coverage*100:.1f}%)", self.verbose)
-        _vprint(f"[CORPUS] 📊 Backfill={backfill_added}, Isolates={isolates_added}", self.verbose)
-        
-        # Step 6: Map results back to prompts
-        results = {}
-        for prompt_id in batch_prompts:
-            prompt_state = self.prompt_registry[prompt_id]
-            kept_sentences = []
-            removed_count = 0
+                    # Add best sentence back
+                    selected_ids.add(best_sent.id)
+                    selected_sentences.append(best_sent)
+                
+                    # Update covered_nodes: add this node + its neighbors
+                    covered_nodes.add(best_sent.id)
+                    for other in all_sentences:
+                        if other.id != best_sent.id:
+                            if are_sentences_similar(best_sent, other, semantic_threshold=0.60):
+                                covered_nodes.add(other.id)
+                
+                    removed_sentences.remove(best_sent)
+                    backfill_added += 1
+                
+                    # Update coverage
+                    node_coverage_before = len(covered_nodes) / total_nodes
+                    iteration += 1
+                
+                    if backfill_added <= 5:
+                        _vprint(f"[CORPUS]   ✅ Backfill +{best_gain} nodes: '{best_sent.text[:60]}...' (coverage now {node_coverage_before*100:.1f}%)", self.verbose)
             
-            for idx, sentence_text in enumerate(prompt_state.sentences):
-                sent_id = f"{prompt_id}_{idx}"
-                if sent_id in selected_ids:
-                    kept_sentences.append(sentence_text)
-                else:
-                    removed_count += 1
+                _vprint(f"[CORPUS] 📈 After backfill: +{backfill_added} sentences, node coverage {node_coverage_before*100:.1f}%)", self.verbose)
             
-            results[prompt_id] = {
-                'kept': kept_sentences,
-                'removed': removed_count,
-                'original_count': len(prompt_state.sentences)
-            }
-        
-        # Step 7: Store results and emit to prompts
-        for prompt_id in batch_prompts:
-            prompt_state = self.prompt_registry[prompt_id]
-            result = results[prompt_id]
-            prompt_state.sentences = result['kept']
+                # Step 5: ISOLATES PASS - add uncovered degree=0 nodes
+                # These are unique nodes with no similar neighbors
+                uncovered_isolates = [sent for sent in all_sentences 
+                                      if sent.id not in covered_nodes and degree_map[sent.id] == 0]
             
-            reduction_pct = (result['removed'] / result['original_count'] * 100) if result['original_count'] > 0 else 0
-            _vprint(f"[CORPUS]   Prompt {prompt_id[:8]}: {result['original_count']} → {len(result['kept'])} sentences ({reduction_pct:.1f}% removed)", self.verbose)
+                if uncovered_isolates:
+                    _vprint(f"[CORPUS] 🔧 Isolates pass: {len(uncovered_isolates)} uncovered isolates (degree=0)", self.verbose)
+                
+                    for sent in uncovered_isolates:
+                        if node_coverage_before >= target_coverage:
+                            break
+                        selected_ids.add(sent.id)
+                        covered_nodes.add(sent.id)
+                        isolates_added += 1
+                        node_coverage_before = len(covered_nodes) / total_nodes
+                    
+                        if isolates_added <= 5:
+                            _vprint(f"[CORPUS]   ✅ Isolate: '{sent.text[:60]}...'", self.verbose)
+                
+                    if isolates_added > 0:
+                        _vprint(f"[CORPUS] 📈 After isolates: +{isolates_added} sentences, node coverage {node_coverage_before*100:.1f}%", self.verbose)
         
-        # Update telemetry
-        self.telemetry.entity_coverage_avg = final_node_coverage * 100  # Now tracking NODE coverage
-        # Always show final batch summary (key metric)
-        print(f"[CORPUS] ✅ Batch complete: Node coverage {final_node_coverage*100:.1f}%")
+            # Final coverage stats (NODE universe)
+            final_selected = len(selected_ids)
+            final_covered_nodes = len(covered_nodes)
+            final_node_coverage = final_covered_nodes / total_nodes if total_nodes > 0 else 0.0
         
-        # Update telemetry
-        if self.telemetry.barrier_times:
-            self.telemetry.avg_barrier_ms = sum(self.telemetry.barrier_times) / len(self.telemetry.barrier_times)
-            self.telemetry.max_barrier_ms = max(self.telemetry.barrier_times)
+            # Assert denominator is |V| (all nodes, no filtering)
+            assert total_nodes == len(all_sentences), f"Denominator mismatch: {total_nodes} != {len(all_sentences)}"
         
-        self.telemetry.tokens_saved = (self.telemetry.chars_in - self.telemetry.chars_out) // 4
+            _vprint(f"[CORPUS] ✅ Final: kept={final_selected}/{total_nodes}, covered (S∪N(S))={final_covered_nodes}/{total_nodes} ({final_node_coverage*100:.1f}%)", self.verbose)
+            _vprint(f"[CORPUS] 📊 Backfill={backfill_added}, Isolates={isolates_added}", self.verbose)
         
-        # Release prompts SEQUENTIALLY to avoid race condition in on_llm_start
-        _vprint(f"[CORPUS] 🚦 Releasing {len(batch_prompts)} prompts sequentially...", self.verbose)
-        for i, prompt_id in enumerate(batch_prompts):
-            event = self.prompt_events.get(prompt_id)
-            if event:
-                event.set()  # Wake up this specific thread
-                # Longer delay to ensure threads hit on_llm_start one at a time
-                if i < len(batch_prompts) - 1:  # Don't delay after the last one
-                    time.sleep(0.5)  # 500ms stagger to be safe
+            # Step 6: Map results back to prompts
+            results = {}
+            for prompt_id in batch_prompts:
+                prompt_state = self.prompt_registry[prompt_id]
+                kept_sentences = []
+                removed_count = 0
+            
+                for idx, sentence_text in enumerate(prompt_state.sentences):
+                    sent_id = f"{prompt_id}_{idx}"
+                    if sent_id in selected_ids:
+                        kept_sentences.append(sentence_text)
+                    else:
+                        removed_count += 1
+            
+                results[prompt_id] = {
+                    'kept': kept_sentences,
+                    'removed': removed_count,
+                    'original_count': len(prompt_state.sentences)
+                }
         
-        # Clean up events to prevent memory leak
-        for prompt_id in batch_prompts:
-            self.prompt_events.pop(prompt_id, None)
+            # Step 7: Store results and emit to prompts
+            for prompt_id in batch_prompts:
+                prompt_state = self.prompt_registry[prompt_id]
+                result = results[prompt_id]
+                prompt_state.sentences = result['kept']
+            
+                reduction_pct = (result['removed'] / result['original_count'] * 100) if result['original_count'] > 0 else 0
+                _vprint(f"[CORPUS]   Prompt {prompt_id[:8]}: {result['original_count']} → {len(result['kept'])} sentences ({reduction_pct:.1f}% removed)", self.verbose)
+        
+            # Update telemetry
+            self.telemetry.entity_coverage_avg = final_node_coverage * 100  # Now tracking NODE coverage
+            # Always show final batch summary (key metric)
+            print(f"[CORPUS] ✅ Batch complete: Node coverage {final_node_coverage*100:.1f}%")
+        
+            # Update telemetry
+            if self.telemetry.barrier_times:
+                self.telemetry.avg_barrier_ms = sum(self.telemetry.barrier_times) / len(self.telemetry.barrier_times)
+                self.telemetry.max_barrier_ms = max(self.telemetry.barrier_times)
+        
+            self.telemetry.tokens_saved = (self.telemetry.chars_in - self.telemetry.chars_out) // 4
+        
+            # Release prompts SEQUENTIALLY to avoid race condition in on_llm_start
+            _vprint(f"[CORPUS] 🚦 Releasing {len(batch_prompts)} prompts sequentially...", self.verbose)
+            for i, prompt_id in enumerate(batch_prompts):
+                event = self.prompt_events.get(prompt_id)
+                if event:
+                    event.set()  # Wake up this specific thread
+                    # Longer delay to ensure threads hit on_llm_start one at a time
+                    if i < len(batch_prompts) - 1:  # Don't delay after the last one
+                        time.sleep(0.5)  # 500ms stagger to be safe
+        
+            # Clean up events to prevent memory leak
+            for prompt_id in batch_prompts:
+                self.prompt_events.pop(prompt_id, None)
     
     def _get_deduplicated_prompt(self, prompt_id: str) -> str:
         """Get deduplicated prompt text."""
