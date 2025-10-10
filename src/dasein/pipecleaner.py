@@ -220,6 +220,7 @@ class RunScopedCorpus:
         self.barrier_cap: float = 10.0  # Max 10s
         self.batch_ready = threading.Event()  # Signal when batch is processed
         self.prompt_events: Dict[str, asyncio.Event] = {}  # Per-prompt events for ASYNC sequential release
+        self.prompt_loops: Dict[str, asyncio.AbstractEventLoop] = {}  # Event loops for thread-safe signaling
         
         # Sequence tracking
         self.next_seq = 0
@@ -382,7 +383,9 @@ class RunScopedCorpus:
         # Add to batch queue and manage barrier
         # Create per-prompt ASYNC event for sequential release
         prompt_ready = asyncio.Event()
+        loop = asyncio.get_running_loop()
         self.prompt_events[prompt_id] = prompt_ready
+        self.prompt_loops[prompt_id] = loop
         
         with self.batch_lock:
             self.batch_queue.append(prompt_id)
@@ -759,7 +762,12 @@ class RunScopedCorpus:
             for i, prompt_id in enumerate(batch_prompts):
                 event = self.prompt_events.get(prompt_id)
                 if event:
-                    event.set()  # Wake up this specific thread
+                    # Signal the asyncio.Event from the original loop thread-safely
+                    loop = self.prompt_loops.get(prompt_id)
+                    if loop:
+                        loop.call_soon_threadsafe(event.set)
+                    else:
+                        event.set()
                     # Longer delay to ensure threads hit on_llm_start one at a time
                     if i < len(batch_prompts) - 1:  # Don't delay after the last one
                         time.sleep(0.5)  # 500ms stagger to be safe
@@ -767,6 +775,7 @@ class RunScopedCorpus:
             # Clean up events to prevent memory leak
             for prompt_id in batch_prompts:
                 self.prompt_events.pop(prompt_id, None)
+                self.prompt_loops.pop(prompt_id, None)
     
     def _get_deduplicated_prompt(self, prompt_id: str) -> str:
         """Get deduplicated prompt text."""
@@ -945,23 +954,12 @@ def split_into_sentences(text: str) -> List[str]:
         r'\n\s*\n',  # Paragraph breaks
     ]
     
-    combined_pattern = '|'.join(f'({p})' for p in patterns)
+    # Use non-capturing groups so delimiters are discarded by re.split
+    combined_pattern = '(?:' + '|'.join(patterns) + ')'
     parts = re.split(combined_pattern, text)
     
-    # Reconstruct sentences (filter out delimiters)
-    current = ""
-    for part in parts:
-        if part is None:
-            continue
-        if re.match(combined_pattern, part):
-            if current.strip():
-                sentences.append(current.strip())
-            current = ""
-        else:
-            current += part
-    
-    if current.strip():
-        sentences.append(current.strip())
+    # Collect non-empty segments as sentences
+    sentences = [p.strip() for p in parts if p and p.strip()]
     
     # Restore code blocks
     restored = []
