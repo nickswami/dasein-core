@@ -3044,11 +3044,9 @@ Follow these rules when planning your actions."""
             print(f"Query: {query}")
             print("-" * 50)
             
-            # Clear trace before each run (except the first one)
+            # Reset callback handler state before each run (except the first one)
+            # Note: reset_run_state() already clears trace, function calls, guards, and timers
             if i > 0:
-                from .capture import clear_trace
-                clear_trace()
-                # Reset callback handler state (function calls, injection guard)
                 if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'reset_run_state'):
                     self._callback_handler.reset_run_state()
             
@@ -3088,11 +3086,9 @@ Follow these rules when planning your actions."""
             print(f"Query: {query}")
             print("-" * 50)
             
-            # Clear trace before each run (except the first one)
+            # Reset callback handler state before each run (except the first one)
+            # Note: reset_run_state() already clears trace, function calls, guards, and timers
             if i > 0:
-                from .capture import clear_trace
-                clear_trace()
-                # Reset callback handler state (function calls, injection guard)
                 if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'reset_run_state'):
                     self._callback_handler.reset_run_state()
             

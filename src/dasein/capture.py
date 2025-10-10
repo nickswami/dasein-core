@@ -379,6 +379,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._compiled_tools_metadata = []  # Store extracted tools
         self._pipecleaner_embedding_model = None  # Cache embedding model for this run
         self._current_tool_name = None  # Track currently executing tool for hotpath deduplication
+        self._last_reset_ts = None  # Debounce guard for reset_run_state()
         
         # Generate stable run_id for corpus deduplication
         import uuid
@@ -397,6 +398,24 @@ class DaseinCallbackHandler(BaseCallbackHandler):
     
     def reset_run_state(self):
         """Reset state that should be cleared between runs."""
+        # Debounce: suppress duplicate rapid invocations (e.g., from multiple callers in same tick)
+        try:
+            from time import monotonic
+            now = monotonic()
+            if getattr(self, '_last_reset_ts', None) is not None and (now - self._last_reset_ts) < 0.05:
+                # Too soon since last reset; skip
+                return
+            self._last_reset_ts = now
+        except Exception:
+            pass
+        # Optional debug: print caller stack to trace root cause of unexpected resets
+        try:
+            import os, traceback
+            if os.getenv("DASEIN_DEBUG_RESET", "0") == "1":
+                stack_excerpt = ''.join(traceback.format_stack(limit=8))
+                self._vprint("[DASEIN][CALLBACK] reset_run_state() caller stack (set DASEIN_DEBUG_RESET=0 to disable):\n" + stack_excerpt, True)
+        except Exception:
+            pass
         self._function_calls_made = {}
         self._injection_guard = set()
         self._trace = []  # Clear instance trace
@@ -1796,7 +1815,7 @@ EXECUTION STATE (functions called so far in this run):
 
 """
                 
-                combined_injection = f""" SYSTEM OVERRIDE — PLANNING TURN ONLY 
+                combined_injection = f""" SYSTEM OVERRIDE 
 These rules OVERRIDE all defaults. You MUST enforce them exactly or the task FAILS.
 
 Tags: AVOID (absolute ban), SKIP (force bypass), FIX (mandatory params), PREFER (ranked choice), HINT (optional).
@@ -2147,9 +2166,17 @@ def clear_trace() -> None:
     # Try to clear traces in active CognateProxy instances
     try:
         import gc
+        seen_handlers = set()
         for obj in gc.get_objects():
-            if hasattr(obj, '_callback_handler') and hasattr(obj._callback_handler, 'reset_run_state'):
-                obj._callback_handler.reset_run_state()
+            if hasattr(obj, '_callback_handler'):
+                handler = getattr(obj, '_callback_handler', None)
+                if handler is None or not hasattr(handler, 'reset_run_state'):
+                    continue
+                handler_id = id(handler)
+                if handler_id in seen_handlers:
+                    continue
+                seen_handlers.add(handler_id)
+                handler.reset_run_state()
     except Exception:
         pass  # Ignore if not available
 
