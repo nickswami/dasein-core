@@ -3758,9 +3758,32 @@ Follow these rules when planning your actions."""
                     # framework top-level module
                     module = getattr(agent_to_fingerprint, '__module__', '') or ''
                     framework = module.split('.')[0] if module else ''
-                    # model id (best-effort)
+                    # model id (best-effort, check multiple locations for nested agents)
                     model_id = ''
+                    llm = None
+                    
+                    # Try direct llm attribute
                     llm = getattr(agent_to_fingerprint, 'llm', None)
+                    
+                    # Try nested in agent.agent (AgentExecutor -> Agent -> LLM)
+                    if not llm:
+                        inner_agent = getattr(agent_to_fingerprint, 'agent', None)
+                        if inner_agent:
+                            llm = getattr(inner_agent, 'llm', None)
+                    
+                    # Try nested in agent.runnable (newer LangChain)
+                    if not llm:
+                        runnable = getattr(agent_to_fingerprint, 'runnable', None)
+                        if runnable:
+                            llm = getattr(runnable, 'llm', None)
+                    
+                    # Try toolkit (SQL agents)
+                    if not llm:
+                        toolkit = getattr(agent_to_fingerprint, 'toolkit', None)
+                        if toolkit:
+                            llm = getattr(toolkit, 'llm', None)
+                    
+                    # Extract model ID from LLM
                     if llm is not None:
                         model_id = (
                             getattr(llm, 'model', None)
@@ -3803,7 +3826,7 @@ Follow these rules when planning your actions."""
                     tool_names = [norm(n) for n in tool_names if n]
                     tools_joined = ','.join(sorted(set(tool_names)))
                     # fixed-order segments (keep keys even if empty to preserve format)
-                    return f"[[FINGERPRINT]] agent={agent_name} | framework={framework} | model={model_id} | tools={tools_joined}"
+                    return f"agent={agent_name}|framework={framework}|model={model_id}|tools={tools_joined}"
                 except Exception:
                     # Fallback to prior behavior on any error
                     return getattr(agent_to_fingerprint, 'agent_id', None) or f"agent_{id(agent_to_fingerprint)}"
@@ -4019,8 +4042,33 @@ Follow these rules when planning your actions."""
                     agent_name = getattr(agent_cls, '__name__', '') if agent_cls else ''
                     module = getattr(agent_to_fingerprint, '__module__', '') or ''
                     framework = module.split('.')[0] if module else ''
+                    
+                    # model id (best-effort, check multiple locations for nested agents)
                     model_id = ''
+                    llm = None
+                    
+                    # Try direct llm attribute
                     llm = getattr(agent_to_fingerprint, 'llm', None)
+                    
+                    # Try nested in agent.agent (AgentExecutor -> Agent -> LLM)
+                    if not llm:
+                        inner_agent = getattr(agent_to_fingerprint, 'agent', None)
+                        if inner_agent:
+                            llm = getattr(inner_agent, 'llm', None)
+                    
+                    # Try nested in agent.runnable (newer LangChain)
+                    if not llm:
+                        runnable = getattr(agent_to_fingerprint, 'runnable', None)
+                        if runnable:
+                            llm = getattr(runnable, 'llm', None)
+                    
+                    # Try toolkit (SQL agents)
+                    if not llm:
+                        toolkit = getattr(agent_to_fingerprint, 'toolkit', None)
+                        if toolkit:
+                            llm = getattr(toolkit, 'llm', None)
+                    
+                    # Extract model ID from LLM
                     if llm is not None:
                         model_id = (
                             getattr(llm, 'model', None)
@@ -4029,6 +4077,7 @@ Follow these rules when planning your actions."""
                             or getattr(llm, 'model_tag', None)
                             or ''
                         )
+                    
                     tool_names = []
                     tools_attr = getattr(agent_to_fingerprint, 'tools', None)
                     if tools_attr:
@@ -4056,7 +4105,7 @@ Follow these rules when planning your actions."""
                     model_id = norm(model_id)
                     tool_names = [norm(n) for n in tool_names if n]
                     tools_joined = ','.join(sorted(set(tool_names)))
-                    return f"[[FINGERPRINT]] agent={agent_name} | framework={framework} | model={model_id} | tools={tools_joined}"
+                    return f"agent={agent_name}|framework={framework}|model={model_id}|tools={tools_joined}"
                 except Exception:
                     return getattr(agent_to_fingerprint, 'agent_id', None) or f"agent_{id(agent_to_fingerprint)}"
 
