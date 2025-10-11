@@ -3746,17 +3746,21 @@ Follow these rules when planning your actions."""
                 print(f"[DASEIN] Calling pre-run service for query: {str(query)[:50]}...")
             
             # Generate agent fingerprint (stable categorical tag)
-            def _minimal_agent_fingerprint(agent) -> str:
+            def _minimal_agent_fingerprint(agent, original_agent) -> str:
+                """Generate fingerprint from ORIGINAL unwrapped agent to avoid wrapper contamination"""
                 try:
+                    # Use original_agent for fingerprinting, not wrapped agent
+                    agent_to_fingerprint = original_agent if original_agent else agent
+                    
                     # agent class
-                    agent_cls = getattr(agent, '__class__', None)
+                    agent_cls = getattr(agent_to_fingerprint, '__class__', None)
                     agent_name = getattr(agent_cls, '__name__', '') if agent_cls else ''
                     # framework top-level module
-                    module = getattr(agent, '__module__', '') or ''
+                    module = getattr(agent_to_fingerprint, '__module__', '') or ''
                     framework = module.split('.')[0] if module else ''
                     # model id (best-effort)
                     model_id = ''
-                    llm = getattr(agent, 'llm', None)
+                    llm = getattr(agent_to_fingerprint, 'llm', None)
                     if llm is not None:
                         model_id = (
                             getattr(llm, 'model', None)
@@ -3765,9 +3769,9 @@ Follow these rules when planning your actions."""
                             or getattr(llm, 'model_tag', None)
                             or ''
                         )
-                    # tools/toolkit
+                    # tools/toolkit (from original agent)
                     tool_names = []
-                    tools_attr = getattr(agent, 'tools', None)
+                    tools_attr = getattr(agent_to_fingerprint, 'tools', None)
                     if tools_attr:
                         try:
                             for t in tools_attr:
@@ -3778,8 +3782,8 @@ Follow these rules when planning your actions."""
                                     tool_names.append(str(name))
                         except Exception:
                             pass
-                    elif getattr(agent, 'toolkit', None):
-                        tk = getattr(agent, 'toolkit')
+                    elif getattr(agent_to_fingerprint, 'toolkit', None):
+                        tk = getattr(agent_to_fingerprint, 'toolkit')
                         tk_tools = getattr(tk, 'tools', None) or getattr(tk, 'get_tools', None)
                         try:
                             iterable = tk_tools() if callable(tk_tools) else tk_tools
@@ -3802,9 +3806,9 @@ Follow these rules when planning your actions."""
                     return f"[[FINGERPRINT]] agent={agent_name} | framework={framework} | model={model_id} | tools={tools_joined}"
                 except Exception:
                     # Fallback to prior behavior on any error
-                    return getattr(agent, 'agent_id', None) or f"agent_{id(agent)}"
+                    return getattr(agent_to_fingerprint, 'agent_id', None) or f"agent_{id(agent_to_fingerprint)}"
 
-            agent_fingerprint = _minimal_agent_fingerprint(self._agent)
+            agent_fingerprint = _minimal_agent_fingerprint(self._agent, self._original_agent)
             
             # Call pre-run service (it will handle baseline flag internally)
             selected_rules = self._service_adapter.select_rules(
@@ -4005,14 +4009,18 @@ Follow these rules when planning your actions."""
                 print(f"[DASEIN] Calling post-run service for rule synthesis ({mode_str} mode)")
             
             # Compute agent fingerprint for post-run (mirror pre-run minimal fingerprint)
-            def _minimal_agent_fingerprint(agent) -> str:
+            def _minimal_agent_fingerprint(agent, original_agent) -> str:
+                """Generate fingerprint from ORIGINAL unwrapped agent to avoid wrapper contamination"""
                 try:
-                    agent_cls = getattr(agent, '__class__', None)
+                    # Use original_agent for fingerprinting, not wrapped agent
+                    agent_to_fingerprint = original_agent if original_agent else agent
+                    
+                    agent_cls = getattr(agent_to_fingerprint, '__class__', None)
                     agent_name = getattr(agent_cls, '__name__', '') if agent_cls else ''
-                    module = getattr(agent, '__module__', '') or ''
+                    module = getattr(agent_to_fingerprint, '__module__', '') or ''
                     framework = module.split('.')[0] if module else ''
                     model_id = ''
-                    llm = getattr(agent, 'llm', None)
+                    llm = getattr(agent_to_fingerprint, 'llm', None)
                     if llm is not None:
                         model_id = (
                             getattr(llm, 'model', None)
@@ -4022,7 +4030,7 @@ Follow these rules when planning your actions."""
                             or ''
                         )
                     tool_names = []
-                    tools_attr = getattr(agent, 'tools', None)
+                    tools_attr = getattr(agent_to_fingerprint, 'tools', None)
                     if tools_attr:
                         try:
                             for t in tools_attr:
@@ -4031,8 +4039,8 @@ Follow these rules when planning your actions."""
                                     tool_names.append(str(name))
                         except Exception:
                             pass
-                    elif getattr(agent, 'toolkit', None):
-                        tk = getattr(agent, 'toolkit')
+                    elif getattr(agent_to_fingerprint, 'toolkit', None):
+                        tk = getattr(agent_to_fingerprint, 'toolkit')
                         tk_tools = getattr(tk, 'tools', None) or getattr(tk, 'get_tools', None)
                         try:
                             iterable = tk_tools() if callable(tk_tools) else tk_tools
@@ -4050,9 +4058,9 @@ Follow these rules when planning your actions."""
                     tools_joined = ','.join(sorted(set(tool_names)))
                     return f"[[FINGERPRINT]] agent={agent_name} | framework={framework} | model={model_id} | tools={tools_joined}"
                 except Exception:
-                    return getattr(agent, 'agent_id', None) or f"agent_{id(agent)}"
+                    return getattr(agent_to_fingerprint, 'agent_id', None) or f"agent_{id(agent_to_fingerprint)}"
 
-            agent_fingerprint = _minimal_agent_fingerprint(self._agent)
+            agent_fingerprint = _minimal_agent_fingerprint(self._agent, self._original_agent)
             
             # Get tool metadata from callback handler (extracted during runtime)
             tools_metadata = []
