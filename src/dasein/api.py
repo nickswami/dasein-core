@@ -4091,6 +4091,23 @@ Follow these rules when planning your actions."""
             else:
                 print(f"[DASEIN] WARNING: No tools extracted! Agent type: {type(self._agent)}")
 
+            # Extract rules_applied from selected_rules (rule IDs that were actually selected by pre-run)
+            rules_applied = []
+            for rule in selected_rules:
+                if isinstance(rule, dict):
+                    rule_id = rule.get('id', '')
+                    if rule_id:
+                        rules_applied.append(rule_id)
+                elif hasattr(rule, 'id'):
+                    rules_applied.append(rule.id)
+            print(f"[DASEIN] Passing {len(rules_applied)} rule IDs to post-run: {rules_applied}")
+            
+            # Compute context_hash: represents query + agent fingerprint (what context node contains)
+            import hashlib
+            combined_context = f"{query}:{agent_fingerprint}"
+            context_hash = f"ctx_{hashlib.sha256(combined_context.encode()).hexdigest()[:9]}"
+            print(f"[DASEIN] Computed context_hash: {context_hash}")
+
             response = self._service_adapter.synthesize_rules(
                 run_id=None,  # Will use stored run_id from pre-run phase
                 trace=cleaned_trace,
@@ -4106,7 +4123,9 @@ Follow these rules when planning your actions."""
                 post_run_mode=self._post_run,  # Pass post_run mode ("full" or "kpi_only")
                 wait_for_synthesis=wait_for_synthesis,  # Wait for synthesis on retry runs (except last)
                 tools_metadata=tools_metadata,  # Tool metadata for Stage 3.5 tool grounding
-                graph_metadata=graph_metadata  # Graph metadata for Stage 3.5 node grounding
+                graph_metadata=graph_metadata,  # Graph metadata for Stage 3.5 node grounding
+                rules_applied=rules_applied,  # Rule IDs selected by pre-run
+                context_hash=context_hash  # Context hash for graph grouping
             )
 
             # response is a dict from ServiceAdapter; handle accordingly

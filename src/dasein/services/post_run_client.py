@@ -34,6 +34,8 @@ class RuleSynthesisRequest:
     step_id: Optional[str] = None
     tools_metadata: Optional[List[Dict[str, Any]]] = None  # Tool metadata for Stage 3.5 tool grounding
     graph_metadata: Optional[Dict[str, Any]] = None  # Graph metadata for Stage 3.5 node grounding
+    rules_applied: Optional[List[str]] = None  # Rule IDs that were selected by pre-run and applied during execution
+    context_hash: Optional[str] = None  # Context hash for grouping traces (query + agent fingerprint)
 
 
 @dataclass
@@ -99,6 +101,8 @@ class PostRunClient:
             "wait_for_synthesis": request.wait_for_synthesis,
             "tools_metadata": request.tools_metadata or [],  # Tool metadata for Stage 3.5 tool grounding
             "graph_metadata": request.graph_metadata or {},  # Graph metadata for Stage 3.5 node grounding
+            "rules_applied": request.rules_applied or [],  # Rule IDs selected and applied
+            "context_hash": request.context_hash,  # Context hash for graph grouping
         }
         
         logger.info(f"Synthesizing rules for run: {request.run_id}")
