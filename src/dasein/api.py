@@ -3839,7 +3839,8 @@ Follow these rules when planning your actions."""
                 agent_fingerprint=agent_fingerprint,
                 max_rules_per_layer=self._top_k,  # Configurable via top_k parameter
                 performance_tracking_id=self._performance_tracking_id,  # For rule isolation
-                is_baseline=is_baseline  # Skip rule selection for baselines
+                is_baseline=is_baseline,  # Skip rule selection for baselines
+                verbose=self._verbose  # Pass verbose flag through
             )
             
             print(f"[DASEIN] Pre-run service returned {len(selected_rules)} rules")

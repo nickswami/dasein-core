@@ -43,7 +43,8 @@ class ServiceAdapter:
     def select_rules(self, query: str, agent_fingerprint: Optional[str] = None, 
                     artifacts: Optional[List[str]] = None, limits: Optional[Dict[str, int]] = None,
                     run_id: Optional[str] = None, max_rules_per_layer: Optional[int] = 5,
-                    performance_tracking_id: Optional[str] = None, is_baseline: bool = False) -> List[Dict[str, Any]]:
+                    performance_tracking_id: Optional[str] = None, is_baseline: bool = False,
+                    verbose: bool = False) -> List[Dict[str, Any]]:
         """
         Select rules for an incoming run (replaces local rule selection)
         
@@ -68,7 +69,8 @@ class ServiceAdapter:
                 run_id=run_id,
                 max_rules_per_layer=max_rules_per_layer,
                 performance_tracking_id=performance_tracking_id,
-                is_baseline=is_baseline
+                is_baseline=is_baseline,
+                verbose=verbose
             )
             
             response = self.pre_run_client.select_rules(request)

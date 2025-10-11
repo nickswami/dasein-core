@@ -28,6 +28,7 @@ class RuleSelectionRequest:
     max_rules_per_layer: Optional[int] = 5
     performance_tracking_id: Optional[str] = None
     is_baseline: bool = False
+    verbose: bool = False
 
 
 @dataclass
@@ -87,7 +88,8 @@ class PreRunClient:
             "run_id": request.run_id,
             "max_rules_per_layer": request.max_rules_per_layer,
             "performance_tracking_id": request.performance_tracking_id,
-            "is_baseline": request.is_baseline
+            "is_baseline": request.is_baseline,
+            "verbose": request.verbose
         }
         
         logger.info(f"Selecting rules for query: {str(request.query)[:50]}...")
