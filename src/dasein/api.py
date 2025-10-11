@@ -3758,40 +3758,80 @@ Follow these rules when planning your actions."""
                     # framework top-level module
                     module = getattr(agent_to_fingerprint, '__module__', '') or ''
                     framework = module.split('.')[0] if module else ''
-                    # model id (best-effort, check multiple locations for nested agents)
+                    
+                    # model id (comprehensive search through agent structure)
                     model_id = ''
-                    llm = None
                     
-                    # Try direct llm attribute
+                    # Helper to extract model from LLM instance
+                    def _extract_model_from_llm(llm_obj):
+                        if llm_obj is None:
+                            return None
+                        type_name = type(llm_obj).__name__
+                        if 'Language' in type_name or 'Chat' in type_name or 'LLM' in type_name:
+                            return (
+                                getattr(llm_obj, 'model', None)
+                                or getattr(llm_obj, 'model_name', None)
+                                or getattr(llm_obj, 'model_id', None)
+                                or getattr(llm_obj, 'model_tag', None)
+                            )
+                        return None
+                    
+                    # 1. Direct llm
                     llm = getattr(agent_to_fingerprint, 'llm', None)
+                    model_id = _extract_model_from_llm(llm)
                     
-                    # Try nested in agent.agent (AgentExecutor -> Agent -> LLM)
-                    if not llm:
+                    # 2. Legacy ReAct: agent.llm_chain.llm
+                    if not model_id:
+                        llm_chain = getattr(agent_to_fingerprint, 'llm_chain', None)
+                        if llm_chain:
+                            llm = getattr(llm_chain, 'llm', None)
+                            model_id = _extract_model_from_llm(llm)
+                    
+                    # 3. Nested agent.agent
+                    if not model_id:
                         inner_agent = getattr(agent_to_fingerprint, 'agent', None)
                         if inner_agent:
                             llm = getattr(inner_agent, 'llm', None)
+                            model_id = _extract_model_from_llm(llm)
+                            if not model_id:
+                                llm_chain = getattr(inner_agent, 'llm_chain', None)
+                                if llm_chain:
+                                    llm = getattr(llm_chain, 'llm', None)
+                                    model_id = _extract_model_from_llm(llm)
                     
-                    # Try nested in agent.runnable (newer LangChain)
-                    if not llm:
+                    # 4. LCEL runnable graph
+                    if not model_id:
                         runnable = getattr(agent_to_fingerprint, 'runnable', None)
                         if runnable:
-                            llm = getattr(runnable, 'llm', None)
+                            model_id = _extract_model_from_llm(runnable)
+                            if not model_id and hasattr(runnable, 'steps'):
+                                for step in runnable.steps:
+                                    model_id = _extract_model_from_llm(step)
+                                    if model_id:
+                                        break
                     
-                    # Try toolkit (SQL agents)
-                    if not llm:
+                    # 5. Toolkit
+                    if not model_id:
                         toolkit = getattr(agent_to_fingerprint, 'toolkit', None)
                         if toolkit:
                             llm = getattr(toolkit, 'llm', None)
+                            model_id = _extract_model_from_llm(llm)
                     
-                    # Extract model ID from LLM
-                    if llm is not None:
-                        model_id = (
-                            getattr(llm, 'model', None)
-                            or getattr(llm, 'model_name', None)
-                            or getattr(llm, 'model_id', None)
-                            or getattr(llm, 'model_tag', None)
-                            or ''
-                        )
+                    # 6. Tools list
+                    if not model_id:
+                        tools_attr = getattr(agent_to_fingerprint, 'tools', None)
+                        if tools_attr:
+                            try:
+                                for tool in tools_attr:
+                                    llm = getattr(tool, 'llm', None)
+                                    model_id = _extract_model_from_llm(llm)
+                                    if model_id:
+                                        break
+                            except Exception:
+                                pass
+                    
+                    model_id = str(model_id) if model_id else ''
+                    
                     # tools/toolkit (from original agent)
                     tool_names = []
                     tools_attr = getattr(agent_to_fingerprint, 'tools', None)
@@ -4044,40 +4084,78 @@ Follow these rules when planning your actions."""
                     module = getattr(agent_to_fingerprint, '__module__', '') or ''
                     framework = module.split('.')[0] if module else ''
                     
-                    # model id (best-effort, check multiple locations for nested agents)
+                    # model id (comprehensive search through agent structure)
                     model_id = ''
-                    llm = None
                     
-                    # Try direct llm attribute
+                    # Helper to extract model from LLM instance
+                    def _extract_model_from_llm(llm_obj):
+                        if llm_obj is None:
+                            return None
+                        type_name = type(llm_obj).__name__
+                        if 'Language' in type_name or 'Chat' in type_name or 'LLM' in type_name:
+                            return (
+                                getattr(llm_obj, 'model', None)
+                                or getattr(llm_obj, 'model_name', None)
+                                or getattr(llm_obj, 'model_id', None)
+                                or getattr(llm_obj, 'model_tag', None)
+                            )
+                        return None
+                    
+                    # 1. Direct llm
                     llm = getattr(agent_to_fingerprint, 'llm', None)
+                    model_id = _extract_model_from_llm(llm)
                     
-                    # Try nested in agent.agent (AgentExecutor -> Agent -> LLM)
-                    if not llm:
+                    # 2. Legacy ReAct: agent.llm_chain.llm
+                    if not model_id:
+                        llm_chain = getattr(agent_to_fingerprint, 'llm_chain', None)
+                        if llm_chain:
+                            llm = getattr(llm_chain, 'llm', None)
+                            model_id = _extract_model_from_llm(llm)
+                    
+                    # 3. Nested agent.agent
+                    if not model_id:
                         inner_agent = getattr(agent_to_fingerprint, 'agent', None)
                         if inner_agent:
                             llm = getattr(inner_agent, 'llm', None)
+                            model_id = _extract_model_from_llm(llm)
+                            if not model_id:
+                                llm_chain = getattr(inner_agent, 'llm_chain', None)
+                                if llm_chain:
+                                    llm = getattr(llm_chain, 'llm', None)
+                                    model_id = _extract_model_from_llm(llm)
                     
-                    # Try nested in agent.runnable (newer LangChain)
-                    if not llm:
+                    # 4. LCEL runnable graph
+                    if not model_id:
                         runnable = getattr(agent_to_fingerprint, 'runnable', None)
                         if runnable:
-                            llm = getattr(runnable, 'llm', None)
+                            model_id = _extract_model_from_llm(runnable)
+                            if not model_id and hasattr(runnable, 'steps'):
+                                for step in runnable.steps:
+                                    model_id = _extract_model_from_llm(step)
+                                    if model_id:
+                                        break
                     
-                    # Try toolkit (SQL agents)
-                    if not llm:
+                    # 5. Toolkit
+                    if not model_id:
                         toolkit = getattr(agent_to_fingerprint, 'toolkit', None)
                         if toolkit:
                             llm = getattr(toolkit, 'llm', None)
+                            model_id = _extract_model_from_llm(llm)
                     
-                    # Extract model ID from LLM
-                    if llm is not None:
-                        model_id = (
-                            getattr(llm, 'model', None)
-                            or getattr(llm, 'model_name', None)
-                            or getattr(llm, 'model_id', None)
-                            or getattr(llm, 'model_tag', None)
-                            or ''
-                        )
+                    # 6. Tools list
+                    if not model_id:
+                        tools_attr = getattr(agent_to_fingerprint, 'tools', None)
+                        if tools_attr:
+                            try:
+                                for tool in tools_attr:
+                                    llm = getattr(tool, 'llm', None)
+                                    model_id = _extract_model_from_llm(llm)
+                                    if model_id:
+                                        break
+                            except Exception:
+                                pass
+                    
+                    model_id = str(model_id) if model_id else ''
                     
                     tool_names = []
                     tools_attr = getattr(agent_to_fingerprint, 'tools', None)
