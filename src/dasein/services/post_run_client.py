@@ -99,10 +99,11 @@ class PostRunClient:
             "performance_tracking_id": request.performance_tracking_id,
             "skip_synthesis": request.skip_synthesis,
             "wait_for_synthesis": request.wait_for_synthesis,
-            "tools_metadata": request.tools_metadata or [],  # Tool metadata for Stage 3.5 tool grounding
-            "graph_metadata": request.graph_metadata or {},  # Graph metadata for Stage 3.5 node grounding
-            "rules_applied": request.rules_applied or [],  # Rule IDs selected and applied
-            "context_hash": request.context_hash,  # Context hash for graph grouping
+            "step_id": request.step_id,
+            "tools_metadata": request.tools_metadata or [],
+            "graph_metadata": request.graph_metadata or {},
+            "rules_applied": request.rules_applied or [],
+            "context_hash": request.context_hash,
         }
         
         logger.info(f"Synthesizing rules for run: {request.run_id}")

@@ -889,6 +889,9 @@ class CognateProxy:
         # Track which LLM classes have been monkey-patched (to avoid double-patching)
         self._patched_llm_classes = set()
         
+        # Generate agent fingerprint ONCE and cache it (must be consistent across pre-run and post-run)
+        self._agent_fingerprint = None
+        
         # Wrap the agent's LLM with our trace capture wrapper
         self._wrap_agent_llm()
         
@@ -3871,7 +3874,10 @@ Follow these rules when planning your actions."""
                     # Fallback to prior behavior on any error
                     return getattr(agent_to_fingerprint, 'agent_id', None) or f"agent_{id(agent_to_fingerprint)}"
 
-            agent_fingerprint = _minimal_agent_fingerprint(self._agent, self._original_agent)
+            # Generate fingerprint once and cache it for reuse in post-run
+            if self._agent_fingerprint is None:
+                self._agent_fingerprint = _minimal_agent_fingerprint(self._agent, self._original_agent)
+            agent_fingerprint = self._agent_fingerprint
             
             # Call pre-run service (it will handle baseline flag internally)
             selected_rules = self._service_adapter.select_rules(
@@ -4188,7 +4194,8 @@ Follow these rules when planning your actions."""
                 except Exception:
                     return getattr(agent_to_fingerprint, 'agent_id', None) or f"agent_{id(agent_to_fingerprint)}"
 
-            agent_fingerprint = _minimal_agent_fingerprint(self._agent, self._original_agent)
+            # Reuse cached fingerprint from pre-run (guaranteed to be identical)
+            agent_fingerprint = self._agent_fingerprint
             
             # Get tool metadata from callback handler (extracted during runtime)
             tools_metadata = []
