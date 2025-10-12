@@ -1828,8 +1828,7 @@ Precedence: AVOID/SKIP > FIX > PREFER > HINT. On conflict, the higher rule ALWAY
 - PREFER: when multiple compliant options exist, choose the preferred—NO exceptions.
 - Recovery: if a banned/skipped item already failed, IMMEDIATELY switch to a compliant alternative.
 
-Output Contract: Produce ONE compliant tool/function call (or direct answer if none is needed).  
-NO reasoning, NO justification, NO markdown.
+Honor the agent's existing output contract verbatim; do not add or change fields or formatting.
 
 Rules to Enforce:
 
