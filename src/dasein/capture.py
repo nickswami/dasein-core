@@ -445,27 +445,27 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         Called from on_llm_start when tools are detected for a node.
         """
         try:
-            print(f"\n{'='*70}")
-            print(f"[DASEIN][TOOL_PATCH] 🔧 Patching tools for node: {node_name}")
-            print(f"{'='*70}")
+            self._vprint(f"\n{'='*70}")
+            self._vprint(f"[DASEIN][TOOL_PATCH] 🔧 Patching tools for node: {node_name}")
+            self._vprint(f"{'='*70}")
             
             from .wrappers import patch_tool_instance
             
             # Track patched tools to avoid double-patching
             if not hasattr(self, '_patched_tools'):
                 self._patched_tools = set()
-                print(f"[DASEIN][TOOL_PATCH] Initialized patched tools tracker")
+                self._vprint(f"[DASEIN][TOOL_PATCH] Initialized patched tools tracker")
             
             # Find the actual tool objects for this node in the agent graph
-            print(f"[DASEIN][TOOL_PATCH] Searching for tool objects in node '{node_name}'...")
+            self._vprint(f"[DASEIN][TOOL_PATCH] Searching for tool objects in node '{node_name}'...")
             tool_objects = self._find_tool_objects_for_node(node_name)
             
             if not tool_objects:
-                print(f"[DASEIN][TOOL_PATCH] ⚠️  No tool objects found for node '{node_name}'")
-                print(f"{'='*70}\n")
+                self._vprint(f"[DASEIN][TOOL_PATCH] ⚠️  No tool objects found for node '{node_name}'")
+                self._vprint(f"{'='*70}\n")
                 return
             
-            print(f"[DASEIN][TOOL_PATCH] ✓ Found {len(tool_objects)} tool object(s)")
+            self._vprint(f"[DASEIN][TOOL_PATCH] ✓ Found {len(tool_objects)} tool object(s)")
             
             # Patch each tool
             patched_count = 0
@@ -474,28 +474,28 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                 tool_type = type(tool_obj).__name__
                 tool_id = f"{node_name}:{tool_name}"
                 
-                print(f"[DASEIN][TOOL_PATCH] [{i}/{len(tool_objects)}] Tool: '{tool_name}' (type: {tool_type})")
+                self._vprint(f"[DASEIN][TOOL_PATCH] [{i}/{len(tool_objects)}] Tool: '{tool_name}' (type: {tool_type})")
                 
                 if tool_id in self._patched_tools:
-                    print(f"[DASEIN][TOOL_PATCH]   ⏭️  Already patched, skipping")
+                    self._vprint(f"[DASEIN][TOOL_PATCH]   ⏭️  Already patched, skipping")
                 else:
-                    print(f"[DASEIN][TOOL_PATCH]   🔨 Patching...")
+                    self._vprint(f"[DASEIN][TOOL_PATCH]   🔨 Patching...")
                     if patch_tool_instance(tool_obj, self):
                         self._patched_tools.add(tool_id)
                         patched_count += 1
-                        print(f"[DASEIN][TOOL_PATCH]   ✅ Successfully patched '{tool_name}'")
+                        self._vprint(f"[DASEIN][TOOL_PATCH]   ✅ Successfully patched '{tool_name}'")
                     else:
-                        print(f"[DASEIN][TOOL_PATCH]   ❌ Failed to patch '{tool_name}'")
+                        self._vprint(f"[DASEIN][TOOL_PATCH]   ❌ Failed to patch '{tool_name}'")
             
-            print(f"[DASEIN][TOOL_PATCH] Summary: Patched {patched_count}/{len(tool_objects)} tools")
-            print(f"[DASEIN][TOOL_PATCH] Total tools patched so far: {len(self._patched_tools)}")
-            print(f"{'='*70}\n")
+            self._vprint(f"[DASEIN][TOOL_PATCH] Summary: Patched {patched_count}/{len(tool_objects)} tools")
+            self._vprint(f"[DASEIN][TOOL_PATCH] Total tools patched so far: {len(self._patched_tools)}")
+            self._vprint(f"{'='*70}\n")
         
         except Exception as e:
-            print(f"[DASEIN][TOOL_PATCH] ❌ ERROR patching tools for node {node_name}: {e}")
+            self._vprint(f"[DASEIN][TOOL_PATCH] ❌ ERROR patching tools for node {node_name}: {e}")
             import traceback
             traceback.print_exc()
-            print(f"{'='*70}\n")
+            self._vprint(f"{'='*70}\n")
     
     def _search_node_recursively(self, node_name: str, nodes: dict, depth: int = 0) -> list:
         """Recursively search for a node by name in graphs and subgraphs."""

@@ -411,14 +411,20 @@ async def run_microturn_enforcement(
                 if sig in seen_in_response or sig in patch_depth.seen_tool_signatures:
                     # Duplicate detected
                     duplicates.append((idx, sig))
-                    print(f"[DASEIN][MICROTURN] 🔄 Duplicate detected: {sig}")
+            # Debug duplicate detection only if env enables it
+            import os
+            if os.getenv("DASEIN_DEBUG_MICROTURN", "0") == "1":
+                print(f"[DASEIN][MICROTURN] 🔄 Duplicate detected: {sig}")
                 else:
                     # First occurrence
                     seen_in_response.add(sig)
         
         # DETERMINISTIC DUPLICATE BLOCKING (always on)
         if duplicates and msg:
-            print(f"[DASEIN][MICROTURN] Blocking {len(duplicates)} duplicate call(s)")
+            # Keep this high-signal log behind env flag
+            import os
+            if os.getenv("DASEIN_DEBUG_MICROTURN", "0") == "1":
+                print(f"[DASEIN][MICROTURN] Blocking {len(duplicates)} duplicate call(s)")
             blocked_count, blocked_calls = modify_tool_calls_with_deadletter(
                 msg,
                 [],  # No LLM-based compliant names, just mark duplicates
@@ -429,7 +435,8 @@ async def run_microturn_enforcement(
             
             if blocked_count > 0:
                 update_callback_state(callback_handler, blocked_calls)
-                print(f"[DASEIN][MICROTURN] ✅ Blocked {blocked_count} duplicate(s)")
+                if os.getenv("DASEIN_DEBUG_MICROTURN", "0") == "1":
+                    print(f"[DASEIN][MICROTURN] ✅ Blocked {blocked_count} duplicate(s)")
                 return True
         
         # LLM-BASED MICROTURN (behind flag)
@@ -461,15 +468,20 @@ async def run_microturn_enforcement(
                 
                 if blocked_count > 0:
                     update_callback_state(callback_handler, blocked_calls)
-                    print(f"[DASEIN][MICROTURN] ✅ LLM blocked {blocked_count} call(s): {blocked_calls}")
+                    if os.getenv("DASEIN_DEBUG_MICROTURN", "0") == "1":
+                        print(f"[DASEIN][MICROTURN] ✅ LLM blocked {blocked_count} call(s): {blocked_calls}")
                     return True
         
         # No enforcement applied
         return False
         
     except Exception as e:
-        print(f"[DASEIN][MICROTURN] ⚠️ Error during enforcement: {e}")
+        # Only print on debug; otherwise fail silently
+        import os
+        if os.getenv("DASEIN_DEBUG_MICROTURN", "0") == "1":
+            print(f"[DASEIN][MICROTURN] ⚠️ Error during enforcement: {e}")
         import traceback
-        traceback.print_exc()
+        if os.getenv("DASEIN_DEBUG_MICROTURN", "0") == "1":
+            traceback.print_exc()
         return False
 

@@ -59,15 +59,15 @@ def _get_embedding_model():
             if _embedding_model is None:
                 try:
                     from sentence_transformers import SentenceTransformer
-                    print("[PIPECLEANER] Loading embedding model: all-MiniLM-L6-v2 (384-dim, ~80MB)...")
+                    _vprint("[PIPECLEANER] Loading embedding model: all-MiniLM-L6-v2 (384-dim, ~80MB)...", True)
                     # Force CPU device to avoid meta tensor issues
                     _embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-                    print("[PIPECLEANER] ✅ Embedding model loaded successfully (CPU)")
+                    _vprint("[PIPECLEANER] ✅ Embedding model loaded successfully (CPU)", True)
                 except ImportError:
-                    print("[PIPECLEANER] ⚠️  sentence-transformers not installed. Install: pip install sentence-transformers")
+                    _vprint("[PIPECLEANER] ⚠️  sentence-transformers not installed. Install: pip install sentence-transformers", True)
                     raise
                 except Exception as e:
-                    print(f"[PIPECLEANER] ⚠️  Failed to load embedding model: {e}")
+                    _vprint(f"[PIPECLEANER] ⚠️  Failed to load embedding model: {e}", True)
                     raise
     
     return _embedding_model
@@ -79,14 +79,14 @@ def _get_spacy_model():
     if _spacy_nlp is None:
         try:
             import spacy
-            print("[PIPECLEANER] Loading spaCy model: en_core_web_sm...")
+            _vprint("[PIPECLEANER] Loading spaCy model: en_core_web_sm...", True)
             _spacy_nlp = spacy.load("en_core_web_sm")
-            print("[PIPECLEANER] ✅ spaCy model loaded successfully")
+            _vprint("[PIPECLEANER] ✅ spaCy model loaded successfully", True)
         except ImportError:
-            print("[PIPECLEANER] ⚠️  spaCy not installed. Using regex fallback for entities.")
+            _vprint("[PIPECLEANER] ⚠️  spaCy not installed. Using regex fallback for entities.", True)
             _spacy_nlp = "fallback"
         except OSError:
-            print("[PIPECLEANER] ⚠️  spaCy model not found. Using regex fallback for entities.")
+            _vprint("[PIPECLEANER] ⚠️  spaCy model not found. Using regex fallback for entities.", True)
             _spacy_nlp = "fallback"
     return _spacy_nlp
 
@@ -394,7 +394,7 @@ class RunScopedCorpus:
                 # First prompt in batch, start timer at 5s
                 self.batch_start_time = arrival_time
                 self.barrier_duration = 5.0
-                print(f"[CORPUS] ⏱️  Starting batch barrier: 5.0s (first prompt, min wait)")
+                _vprint(f"[CORPUS] ⏱️  Starting batch barrier: 5.0s (first prompt, min wait)", self.verbose)
                 self.batch_timer = threading.Timer(self.barrier_duration, self._process_batch)
                 self.batch_timer.start()
             else:
@@ -421,7 +421,7 @@ class RunScopedCorpus:
         
         if timed_out:
             # Fail open: return original text if batch processing hangs
-            print(f"[CORPUS] ⚠️  Timeout waiting for batch processing, returning original prompt")
+            _vprint(f"[CORPUS] ⚠️  Timeout waiting for batch processing, returning original prompt", self.verbose)
             self.telemetry.chars_out += len(prompt_text)
             return prompt_text
         
@@ -430,7 +430,7 @@ class RunScopedCorpus:
         
         if not deduplicated_text:
             # Safety: if result is missing, return original
-            print(f"[CORPUS] ⚠️  Missing deduplicated result for prompt {prompt_id[:8]}, returning original")
+            _vprint(f"[CORPUS] ⚠️  Missing deduplicated result for prompt {prompt_id[:8]}, returning original", self.verbose)
             self.telemetry.chars_out += len(prompt_text)
             return prompt_text
         
@@ -456,7 +456,7 @@ class RunScopedCorpus:
                 self.telemetry.batches_processed += 1
             
                 # Always show batch summary (key metric)
-                print(f"\n[CORPUS] 🔄 Processing batch: {len(batch_prompts)} prompts, barrier={batch_duration_ms:.0f}ms")
+                _vprint(f"\n[CORPUS] 🔄 Processing batch: {len(batch_prompts)} prompts, barrier={batch_duration_ms:.0f}ms", self.verbose)
         
             # Step 0: Compute embeddings for NEW prompts in this batch (BATCHED operation!)
             # This is done ONCE for the entire batch, allowing parallel arrivals
@@ -563,7 +563,7 @@ class RunScopedCorpus:
             non_isolates = [s for s in all_sentences if degree_map[s.id] > 0]
             pct_isolates = len(isolates_before) / len(all_sentences) * 100 if all_sentences else 0
             avg_degree_non_iso = sum(degree_map[s.id] for s in non_isolates) / len(non_isolates) if non_isolates else 0
-            print(f"[CORPUS] 📊 Graph: isolates={pct_isolates:.1f}% (expect <20%), non-isolate avg degree={avg_degree_non_iso:.1f} (expect >3)")
+            _vprint(f"[CORPUS] 📊 Graph: isolates={pct_isolates:.1f}% (expect <20%), non-isolate avg degree={avg_degree_non_iso:.1f} (expect >3)", self.verbose)
         
             # Step 3: Run greedy maximum-independent-set selection
             # Start with LOCKED sentences (from previous batches, already emitted)
@@ -571,7 +571,7 @@ class RunScopedCorpus:
             selected_sentences = [s for s in all_sentences if s.id in locked_sentences]
             selected_ids = locked_sentences.copy()
         
-            print(f"[CORPUS] 🔒 Pre-seeded MIS with {len(locked_sentences)} locked sentences from previous batches")
+            _vprint(f"[CORPUS] 🔒 Pre-seeded MIS with {len(locked_sentences)} locked sentences from previous batches", self.verbose)
         
             # Now run MIS on NEW sentences only (exclude locked)
             new_sentences = [s for s in all_sentences if s.id not in locked_sentences]
@@ -748,7 +748,7 @@ class RunScopedCorpus:
             # Update telemetry
             self.telemetry.entity_coverage_avg = final_node_coverage * 100  # Now tracking NODE coverage
             # Always show final batch summary (key metric)
-            print(f"[CORPUS] ✅ Batch complete: Node coverage {final_node_coverage*100:.1f}%")
+            _vprint(f"[CORPUS] ✅ Batch complete: Node coverage {final_node_coverage*100:.1f}%", self.verbose)
         
             # Update telemetry
             if self.telemetry.barrier_times:
@@ -831,9 +831,9 @@ def cleanup_corpus(run_id: str):
     with _corpus_lock:
         if run_id in _run_corpuses:
             corpus = _run_corpuses[run_id]
-            print(corpus.get_telemetry_summary())
+            _vprint(corpus.get_telemetry_summary(), getattr(corpus, 'verbose', False))
             del _run_corpuses[run_id]
-            print(f"[CORPUS] 🗑️  Cleaned up corpus for run_id={run_id[:8]}")
+            _vprint(f"[CORPUS] 🗑️  Cleaned up corpus for run_id={run_id[:8]}", getattr(corpus, 'verbose', False))
 
 
 # ============================================================================

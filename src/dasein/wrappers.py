@@ -31,7 +31,9 @@ def wrap_tools_for_pipecleaner(agent: Any, callback_handler: Any, verbose: bool 
     """
     DISABLED: This function has been disabled to avoid interfering with tool execution.
     """
-    print(f"[WRAPPERS DISABLED] wrap_tools_for_pipecleaner called but DISABLED - no patching will occur")
+    # Keep this message silent unless verbose is explicitly enabled
+    if verbose:
+        print(f"[WRAPPERS DISABLED] wrap_tools_for_pipecleaner called but DISABLED - no patching will occur")
     return False  # Return False to indicate nothing was done
     
     # ORIGINAL CODE BELOW - COMPLETELY DISABLED
@@ -218,7 +220,10 @@ def _extract_text_from_search_result(result: Any, tool_name: str) -> str:
     
     # Tavily format: list of result dicts
     if isinstance(result, list):
-        print(f"[PIPECLEANER] Extracting from list of {len(result)} search results")
+        # Keep extraction log quiet unless user opts in via env
+        import os
+        if os.getenv("DASEIN_DEBUG_PIPECLEANER", "0") == "1":
+            print(f"[PIPECLEANER] Extracting from list of {len(result)} search results")
         for i, item in enumerate(result, 1):
             if isinstance(item, dict):
                 # Extract all text fields
@@ -238,7 +243,9 @@ def _extract_text_from_search_result(result: Any, tool_name: str) -> str:
     elif isinstance(result, dict):
         organic = result.get('organic', []) or result.get('results', [])
         if organic:
-            print(f"[PIPECLEANER] Extracting from dict with {len(organic)} organic results")
+            import os
+            if os.getenv("DASEIN_DEBUG_PIPECLEANER", "0") == "1":
+                print(f"[PIPECLEANER] Extracting from dict with {len(organic)} organic results")
             for i, item in enumerate(organic, 1):
                 title = item.get('title', '')
                 url = item.get('link', '') or item.get('url', '')
@@ -260,12 +267,16 @@ def _extract_text_from_search_result(result: Any, tool_name: str) -> str:
     # Fallback: convert to string (but log warning)
     if not extracted_parts:
         result_str = str(result)
-        print(f"[PIPECLEANER] ⚠️  Unknown result format, using str() - may be truncated")
-        print(f"[PIPECLEANER] Result type: {type(result).__name__}")
+        import os
+        if os.getenv("DASEIN_DEBUG_PIPECLEANER", "0") == "1":
+            print(f"[PIPECLEANER] ⚠️  Unknown result format, using str() - may be truncated")
+            print(f"[PIPECLEANER] Result type: {type(result).__name__}")
         return result_str
     
     full_text = "\n".join(extracted_parts)
-    print(f"[PIPECLEANER] ✅ Extracted {len(full_text)} chars from {len(extracted_parts)} parts")
+    import os
+    if os.getenv("DASEIN_DEBUG_PIPECLEANER", "0") == "1":
+        print(f"[PIPECLEANER] ✅ Extracted {len(full_text)} chars from {len(extracted_parts)} parts")
     return full_text
 
 
@@ -303,13 +314,18 @@ def _apply_pipecleaner_to_result(tool_name: str, result: Any, callback_handler: 
         
         # Return deduplicated result (as same type as original if possible)
         if deduplicated_str != result_str:
-            print(f"[PIPECLEANER] ✅ Deduplicated: {len(result_str)} → {len(deduplicated_str)} chars")
+            import os
+            if os.getenv("DASEIN_DEBUG_PIPECLEANER", "0") == "1":
+                print(f"[PIPECLEANER] ✅ Deduplicated: {len(result_str)} → {len(deduplicated_str)} chars")
             return deduplicated_str
         
         return result
         
     except Exception as e:
-        print(f"[PIPECLEANER] Error applying pipecleaner: {e}")
+        import os
+        if os.getenv("DASEIN_DEBUG_PIPECLEANER", "0") == "1":
+            print(f"[PIPECLEANER] Error applying pipecleaner: {e}")
         import traceback
-        traceback.print_exc()
+        if os.getenv("DASEIN_DEBUG_PIPECLEANER", "0") == "1":
+            traceback.print_exc()
         return result

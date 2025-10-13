@@ -159,7 +159,7 @@ class EventStore:
     
     def _safe_log_warning(self, msg: str) -> None:
         """Log warning message safely."""
-        print(f"[DASEIN][EVENTS] WARNING: {msg}")
+        # Avoid direct prints; rely on logger
         logger.warning(f"[DASEIN][EVENTS] {msg}")
     
     # Add methods for each entity type

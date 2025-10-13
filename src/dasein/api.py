@@ -176,7 +176,7 @@ class DaseinLLMWrapper(BaseChatModel):
         if False:  # Disabled
             try:
                 proposed_func_name = None
-                print(f"[DASEIN][MICROTURN_DEBUG] Checking result for function call...")
+                self._vprint(f"[DASEIN][MICROTURN_DEBUG] Checking result for function call...")
                 if hasattr(result, 'generations') and result.generations:
                     first_gen = result.generations[0]
                     if isinstance(first_gen, list) and len(first_gen) > 0:
@@ -184,19 +184,19 @@ class DaseinLLMWrapper(BaseChatModel):
                     else:
                         generation = first_gen
                     
-                    print(f"[DASEIN][MICROTURN_DEBUG] generation type: {type(generation)}")
+                    self._vprint(f"[DASEIN][MICROTURN_DEBUG] generation type: {type(generation)}")
                     if hasattr(generation, 'message') and hasattr(generation.message, 'additional_kwargs'):
                         func_call = generation.message.additional_kwargs.get('function_call')
-                        print(f"[DASEIN][MICROTURN_DEBUG] func_call: {func_call}")
+                        self._vprint(f"[DASEIN][MICROTURN_DEBUG] func_call: {func_call}")
                         if func_call and isinstance(func_call, dict) and 'name' in func_call:
                             proposed_func_name = func_call['name']
                 else:
-                    print(f"[DASEIN][MICROTURN_DEBUG] No generations in result")
+                    self._vprint(f"[DASEIN][MICROTURN_DEBUG] No generations in result")
                 
                 if not proposed_func_name:
-                    print(f"[DASEIN][MICROTURN_DEBUG] No function call in response, skipping microturn")
+                    self._vprint(f"[DASEIN][MICROTURN_DEBUG] No function call in response, skipping microturn")
                 else:
-                    print(f"[DASEIN][MICROTURN_DEBUG] Found proposed function: {proposed_func_name}")
+                    self._vprint(f"[DASEIN][MICROTURN_DEBUG] Found proposed function: {proposed_func_name}")
                     
                     # Build execution state (BEFORE adding current call)
                     state_lines = []
@@ -222,7 +222,7 @@ If this action is allowed, respond with EXACTLY: PASS
 
 Your response (BLOCK or PASS):"""
                     
-                    print(f"[DASEIN][MICROTURN_DEBUG] Calling microturn LLM...")
+                    self._vprint(f"[DASEIN][MICROTURN_DEBUG] Calling microturn LLM...")
                     from langchain_core.messages import HumanMessage
                     messages_for_microturn = [HumanMessage(content=microturn_prompt)]
                     microturn_response = self._llm.invoke(messages_for_microturn)
@@ -233,10 +233,10 @@ Your response (BLOCK or PASS):"""
                         decision = str(microturn_response).strip().upper()
                     
                     node_name = getattr(self._callback_handler, '_current_chain_node', 'agent')
-                    print(f"[DASEIN][MICROTURN] Node: {node_name} | Proposed: {proposed_func_name} | Decision: {decision}")
+                    self._vprint(f"[DASEIN][MICROTURN] Node: {node_name} | Proposed: {proposed_func_name} | Decision: {decision}")
                     
                     if "BLOCK" in decision:
-                        print(f"[DASEIN][MICROTURN] BLOCKING {proposed_func_name} call!")
+                        self._vprint(f"[DASEIN][MICROTURN] BLOCKING {proposed_func_name} call!")
                         # Modify the result to clear the function call
                         if hasattr(result, 'generations') and result.generations:
                             first_gen = result.generations[0]
@@ -249,7 +249,7 @@ Your response (BLOCK or PASS):"""
                                 generation.message.additional_kwargs['function_call'] = {}
                                 generation.message.content = ""
             except Exception as e:
-                print(f"[DASEIN][MICROTURN] Error in microturn: {e}")
+                self._vprint(f"[DASEIN][MICROTURN] Error in microturn: {e}")
                 import traceback
                 traceback.print_exc()
         
@@ -309,7 +309,7 @@ Your response (BLOCK or PASS):"""
     
     def invoke(self, messages, **kwargs):
         """Override invoke to intercept all LLM calls."""
-        print(f"[DASEIN][WRAPPER] invoke() called with {len(messages) if isinstance(messages, list) else 1} messages")
+        self._vprint(f"[DASEIN][WRAPPER] invoke() called with {len(messages) if isinstance(messages, list) else 1} messages")
         
         # Call the parent's invoke which will call our _generate
         result = super().invoke(messages, **kwargs)
@@ -422,7 +422,7 @@ Your response (BLOCK or PASS):"""
             # Make the evaluation call (this won't be traced)
             response = success_llm.invoke([{"role": "user", "content": success_prompt}])
             
-            print(f"[DEBUG] Success evaluation response: {repr(response.content)}")
+            logger.debug(f"[DEBUG] Success evaluation response: {repr(response.content)}")
             
             # Parse the JSON response
             result_data = json.loads(response.content)
@@ -434,7 +434,7 @@ Your response (BLOCK or PASS):"""
                 return "gave_up"
                 
         except Exception as e:
-            print(f"[DEBUG] Error in _determine_final_outcome: {str(e)}")
+            logger.debug(f"[DEBUG] Error in _determine_final_outcome: {str(e)}")
             return "failed"
     
     def _fallback_outcome_determination(self, output_text):
@@ -521,9 +521,9 @@ def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking
     # CRITICAL: Prevent double-wrapping in Jupyter/Colab when cell is rerun
     # If agent is already a CognateProxy, unwrap it first to avoid nested retry loops
     if isinstance(agent, CognateProxy):
-        print("[DASEIN][WARNING] Agent is already wrapped with cognate(). Unwrapping to prevent nested loops.")
-        print(f"[DASEIN][WARNING] Previous config: retry={agent._retry}, performance_tracking={agent._performance_tracking}")
-        print(f"[DASEIN][WARNING] New config: retry={retry}, performance_tracking={performance_tracking}")
+        logger.warning("[DASEIN][WARNING] Agent is already wrapped with cognate(). Unwrapping to prevent nested loops.")
+        logger.warning(f"[DASEIN][WARNING] Previous config: retry={agent._retry}, performance_tracking={agent._performance_tracking}")
+        logger.warning(f"[DASEIN][WARNING] New config: retry={retry}, performance_tracking={performance_tracking}")
         agent = agent._agent  # Unwrap to get original agent
     
     global _global_cognate_proxy
@@ -538,7 +538,7 @@ def inspect_rules():
     Returns:
         List of rule summaries
     """
-    print("[DASEIN] Rule inspection requires cloud service access - not available in SDK")
+    logger.info("[DASEIN] Rule inspection requires cloud service access - not available in SDK")
     return []
 
 
