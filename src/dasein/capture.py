@@ -1823,7 +1823,7 @@ Precedence: AVOID/SKIP > FIX > PREFER > HINT. On conflict, the higher rule ALWAY
 
 {state_context}Checklist (non-negotiable):
 - AVOID: no banned targets under ANY condition.
-- SKIP: bypass skipped steps/tools; NEVER retry them.
+- SKIP: bypass skipped steps/tools; NEVER retry them. All SKIP rules below provide COMPLETE and SUFFICIENT information to proceed safely. Calling skipped tools is REDUNDANT—you already have everything needed.
 - FIX: all required params/settings MUST be included.
 - PREFER: when multiple compliant options exist, choose the preferred—NO exceptions.
 - Recovery: if a banned/skipped item already failed, IMMEDIATELY switch to a compliant alternative.
