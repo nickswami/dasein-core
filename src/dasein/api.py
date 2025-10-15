@@ -2804,6 +2804,157 @@ Follow these rules when planning your actions."""
         
         return result
     
+    def _create_synthetic_tool_messages(self, selected_rules):
+        """
+        Convert selected rules into synthetic ToolMessage objects.
+        
+        Each rule becomes a tool call/response pair from Dasein, making rules
+        appear as data already retrieved from the environment rather than instructions.
+        
+        Args:
+            selected_rules: List of rule objects or (rule, metadata) tuples
+            
+        Returns:
+            List of ToolMessage objects
+        """
+        try:
+            from langchain_core.messages import ToolMessage
+            import uuid
+            
+            tool_messages = []
+            
+            for i, rule_meta in enumerate(selected_rules):
+                # Unwrap tuple format if present
+                if isinstance(rule_meta, tuple) and len(rule_meta) == 2:
+                    rule, metadata = rule_meta
+                else:
+                    rule = rule_meta
+                    metadata = {}
+                
+                # Extract rule ID and advice text
+                if isinstance(rule, dict):
+                    rule_id = rule.get('id', rule.get('rule_id', f'rule_{i}'))
+                    advice_text = rule.get('advice_text', rule.get('advice', ''))
+                else:
+                    rule_id = getattr(rule, 'id', getattr(rule, 'rule_id', f'rule_{i}'))
+                    advice_text = getattr(rule, 'advice_text', getattr(rule, 'advice', ''))
+                
+                # Skip if no advice text
+                if not advice_text:
+                    continue
+                
+                # Create ToolMessage with rule content
+                # Note: tool_call_id is required for ToolMessage
+                tool_msg = ToolMessage(
+                    content=advice_text,  # Rule advice as tool output
+                    tool_call_id=f"dasein_{rule_id}",
+                    name="Dasein"
+                )
+                
+                tool_messages.append(tool_msg)
+            
+            if tool_messages:
+                self._vprint(f"[DASEIN][TOOL_MSG] Created {len(tool_messages)} synthetic tool messages from rules")
+            
+            return tool_messages
+            
+        except Exception as e:
+            print(f"[DASEIN][TOOL_MSG] ERROR creating synthetic tool messages: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def _inject_tool_messages_into_input(self, args, tool_messages):
+        """
+        Inject synthetic tool messages into agent input at step -1.
+        
+        Handles both LangChain (dict with 'input' field) and LangGraph
+        (dict with 'messages' field) input formats.
+        
+        Args:
+            args: Original args tuple passed to agent.invoke()
+            tool_messages: List of ToolMessage objects to inject
+            
+        Returns:
+            Modified args tuple with tool messages injected
+        """
+        if not tool_messages or not args:
+            return args
+        
+        try:
+            original_input = args[0]
+            
+            # LangGraph format: {"messages": [...]}
+            if isinstance(original_input, dict) and "messages" in original_input:
+                self._vprint(f"[DASEIN][TOOL_MSG] Detected LangGraph input format")
+                modified_input = original_input.copy()
+                existing_messages = modified_input.get("messages", [])
+                
+                # Prepend tool messages BEFORE user message
+                modified_input["messages"] = tool_messages + list(existing_messages)
+                
+                self._vprint(f"[DASEIN][TOOL_MSG] Injected {len(tool_messages)} tool messages before {len(existing_messages)} existing messages")
+                
+                # Return modified args
+                modified_args = list(args)
+                modified_args[0] = modified_input
+                return tuple(modified_args)
+            
+            # LangChain format: {"input": "query"} or just "query"
+            else:
+                self._vprint(f"[DASEIN][TOOL_MSG] Detected LangChain input format")
+                
+                # For LangChain, we need to convert to message format
+                # LangChain expects {"input": str}, so we wrap in messages format
+                from langchain_core.messages import HumanMessage
+                
+                if isinstance(original_input, dict) and "input" in original_input:
+                    # Dict with input field
+                    user_message = HumanMessage(content=original_input["input"])
+                elif isinstance(original_input, str):
+                    # String input
+                    user_message = HumanMessage(content=original_input)
+                else:
+                    # Unknown format, skip injection
+                    self._vprint(f"[DASEIN][TOOL_MSG] Unknown input format, skipping injection")
+                    return args
+                
+                # Create new input with messages
+                # CRITICAL: For LangChain SQL agents, we need to preserve the {"input": ...} format
+                # but some agents can handle {"messages": [...]} format
+                # Let's try both approaches based on agent type
+                
+                if self._is_langgraph:
+                    # LangGraph always uses messages format
+                    modified_input = {
+                        "messages": tool_messages + [user_message]
+                    }
+                else:
+                    # LangChain: Keep original format but add messages field
+                    # Some agents support both input and messages
+                    if isinstance(original_input, dict):
+                        modified_input = original_input.copy()
+                        modified_input["messages"] = tool_messages + [user_message]
+                    else:
+                        # String input: convert to messages format
+                        modified_input = {
+                            "input": original_input,
+                            "messages": tool_messages + [user_message]
+                        }
+                
+                self._vprint(f"[DASEIN][TOOL_MSG] Injected {len(tool_messages)} tool messages into LangChain input")
+                
+                # Return modified args
+                modified_args = list(args)
+                modified_args[0] = modified_input
+                return tuple(modified_args)
+                
+        except Exception as e:
+            print(f"[DASEIN][TOOL_MSG] ERROR injecting tool messages: {e}")
+            import traceback
+            traceback.print_exc()
+            return args
+    
     def invoke(self, *args, **kwargs):
         """
         Invoke the agent with complete Dasein pipeline.
@@ -2876,6 +3027,13 @@ Follow these rules when planning your actions."""
             callbacks.append(self._callback_handler)
             kwargs['callbacks'] = callbacks
             self._vprint(f"[DASEIN][CALLBACK] Attached callback handler to agent with {len(callbacks)} callbacks")
+        
+        # STEP -1: Inject synthetic tool messages BEFORE agent execution
+        # Convert rules to tool messages so they appear as data already retrieved
+        tool_messages = self._create_synthetic_tool_messages(selected_rules)
+        if tool_messages:
+            args = self._inject_tool_messages_into_input(args, tool_messages)
+            print(f"[DASEIN] 💬 Injected {len(tool_messages)} rule(s) as synthetic tool messages (step -1)")
         
         # Run the agent
         result = self._agent.invoke(*args, **kwargs)
@@ -2958,6 +3116,13 @@ Follow these rules when planning your actions."""
             callbacks.append(self._callback_handler)
             kwargs['callbacks'] = callbacks
             self._vprint(f"[DASEIN][CALLBACK] Attached callback handler to agent with {len(callbacks)} callbacks")
+        
+        # STEP -1: Inject synthetic tool messages BEFORE agent execution
+        # Convert rules to tool messages so they appear as data already retrieved
+        tool_messages = self._create_synthetic_tool_messages(selected_rules)
+        if tool_messages:
+            args = self._inject_tool_messages_into_input(args, tool_messages)
+            print(f"[DASEIN] 💬 Injected {len(tool_messages)} rule(s) as synthetic tool messages (step -1)")
         
         # Run the agent asynchronously
         result = await self._agent.ainvoke(*args, **kwargs)
@@ -3173,6 +3338,13 @@ Follow these rules when planning your actions."""
             kwargs['callbacks'] = callbacks
             self._vprint(f"[DASEIN][CALLBACK] Attached callback handler to agent with {len(callbacks)} callbacks")
         
+        # STEP -1: Inject synthetic tool messages BEFORE agent execution
+        # Convert rules to tool messages so they appear as data already retrieved
+        tool_messages = self._create_synthetic_tool_messages(selected_rules)
+        if tool_messages:
+            args = self._inject_tool_messages_into_input(args, tool_messages)
+            print(f"[DASEIN] 💬 Injected {len(tool_messages)} rule(s) as synthetic tool messages (step -1)")
+        
         # Run the agent
         result = self._agent.invoke(*args, **kwargs)
         
@@ -3245,6 +3417,13 @@ Follow these rules when planning your actions."""
             callbacks.append(self._callback_handler)
             kwargs['callbacks'] = callbacks
             self._vprint(f"[DASEIN][CALLBACK] Attached callback handler to agent with {len(callbacks)} callbacks")
+        
+        # STEP -1: Inject synthetic tool messages BEFORE agent execution
+        # Convert rules to tool messages so they appear as data already retrieved
+        tool_messages = self._create_synthetic_tool_messages(selected_rules)
+        if tool_messages:
+            args = self._inject_tool_messages_into_input(args, tool_messages)
+            print(f"[DASEIN] 💬 Injected {len(tool_messages)} rule(s) as synthetic tool messages (step -1)")
         
         # Run the agent asynchronously
         result = await self._agent.ainvoke(*args, **kwargs)
