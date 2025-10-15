@@ -2182,7 +2182,7 @@ def clear_trace() -> None:
         pass  # Ignore if not available
 
 
-def print_trace(max_chars: int = 240, only: Optional[Tuple[str, ...]] = None, suppress: Tuple[str, ...] = ("chain_end",), show_tree: bool = True, show_summary: bool = True) -> None:
+def print_trace(max_chars: int = 240, only: Optional[Tuple[str, ...]] = None, suppress: Tuple[str, ...] = ("chain_end",), show_tree: bool = True, show_summary: bool = True, trace: Optional[List[Dict[str, Any]]] = None) -> None:
     """
     Print a compact fixed-width table of the trace with tree-like view and filtering.
     
@@ -2192,40 +2192,41 @@ def print_trace(max_chars: int = 240, only: Optional[Tuple[str, ...]] = None, su
         suppress: Suppress any step_type in this tuple (default: ("chain_end",))
         show_tree: If True, left-pad args_excerpt by 2*depth spaces for tree-like view
         show_summary: If True, show step_type counts and deduped rows summary
+        trace: Optional trace to print. If None, will search for trace from global proxy.
     """
-    # Try to get trace from active CognateProxy instances
-    trace = None
-    try:
-        # Import here to avoid circular imports
-        from dasein.api import _global_cognate_proxy
-        if _global_cognate_proxy and hasattr(_global_cognate_proxy, '_wrapped_llm') and _global_cognate_proxy._wrapped_llm:
-            trace = _global_cognate_proxy._wrapped_llm.get_trace()
-    except:
-        pass
-    
-    if not trace:
-        trace = get_trace()  # Use the updated get_trace() function
-    
-    # If global trace is empty, try to get it from the last completed run
-    if not trace:
-        # Try to get trace from any active CognateProxy instances
+    # Use provided trace if available, otherwise search for it
+    if trace is None:
         try:
-            import gc
-            for obj in gc.get_objects():
-                # Look for CognateProxy instances with captured traces
-                if hasattr(obj, '_last_run_trace') and obj._last_run_trace:
-                    trace = obj._last_run_trace
-                    print(f"[DASEIN][TRACE] Retrieved trace from CognateProxy: {len(trace)} steps")
-                    break
-                # Fallback: try callback handler
-                elif hasattr(obj, '_callback_handler') and hasattr(obj._callback_handler, 'get_trace'):
-                    potential_trace = obj._callback_handler.get_trace()
-                    if potential_trace:
-                        trace = potential_trace
-                        print(f"[DASEIN][TRACE] Retrieved trace from callback handler: {len(trace)} steps")
-                        break
-        except Exception as e:
+            # Import here to avoid circular imports
+            from dasein.api import _global_cognate_proxy
+            if _global_cognate_proxy and hasattr(_global_cognate_proxy, '_wrapped_llm') and _global_cognate_proxy._wrapped_llm:
+                trace = _global_cognate_proxy._wrapped_llm.get_trace()
+        except:
             pass
+        
+        if not trace:
+            trace = get_trace()  # Use the updated get_trace() function
+        
+        # If global trace is empty, try to get it from the last completed run
+        if not trace:
+            # Try to get trace from any active CognateProxy instances
+            try:
+                import gc
+                for obj in gc.get_objects():
+                    # Look for CognateProxy instances with captured traces
+                    if hasattr(obj, '_last_run_trace') and obj._last_run_trace:
+                        trace = obj._last_run_trace
+                        print(f"[DASEIN][TRACE] Retrieved trace from CognateProxy: {len(trace)} steps")
+                        break
+                    # Fallback: try callback handler
+                    elif hasattr(obj, '_callback_handler') and hasattr(obj._callback_handler, 'get_trace'):
+                        potential_trace = obj._callback_handler.get_trace()
+                        if potential_trace:
+                            trace = potential_trace
+                            print(f"[DASEIN][TRACE] Retrieved trace from callback handler: {len(trace)} steps")
+                            break
+            except Exception as e:
+                pass
     
     if not trace:
         print("No trace data available.")

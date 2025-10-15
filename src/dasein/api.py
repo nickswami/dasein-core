@@ -3217,6 +3217,12 @@ Follow these rules when planning your actions."""
             if i > 0:
                 if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'reset_run_state'):
                     self._callback_handler.reset_run_state()
+                
+                # CRITICAL: Reset agent state to prevent result contamination between runs
+                # LangChain agents may accumulate memory/message history
+                if hasattr(self._agent, 'memory') and self._agent.memory:
+                    self._agent.memory.clear()
+                    print(f"[DASEIN] Cleared agent memory for RUN-{i+1}")
             
             # Capture metrics for this run (first run is baseline)
             run_metrics = self._capture_run_metrics(*args, is_baseline=(i == 0), step_number=(i+1), total_steps=self._retry, **kwargs)
@@ -3230,8 +3236,10 @@ Follow these rules when planning your actions."""
             if self._verbose or self._performance_tracking:
                 print(f"\n TRACE FOR RUN-{i+1}:")
                 print("-" * 30)
+                # Get trace from THIS instance's callback handler, not from global
+                trace = self._callback_handler.get_trace() if self._callback_handler else []
                 from .capture import print_trace
-                print_trace()
+                print_trace(trace=trace)
                 print("-" * 30)
         
         # Print improvement analysis if we have multiple runs
@@ -3259,6 +3267,12 @@ Follow these rules when planning your actions."""
             if i > 0:
                 if hasattr(self, '_callback_handler') and hasattr(self._callback_handler, 'reset_run_state'):
                     self._callback_handler.reset_run_state()
+                
+                # CRITICAL: Reset agent state to prevent result contamination between runs
+                # LangChain agents may accumulate memory/message history
+                if hasattr(self._agent, 'memory') and self._agent.memory:
+                    self._agent.memory.clear()
+                    print(f"[DASEIN] Cleared agent memory for RUN-{i+1}")
             
             # Capture metrics for this run (first run is baseline)
             run_metrics = await self._acapture_run_metrics(*args, is_baseline=(i == 0), step_number=(i+1), total_steps=self._retry, **kwargs)
@@ -3272,8 +3286,10 @@ Follow these rules when planning your actions."""
             if self._verbose or self._performance_tracking:
                 print(f"\n TRACE FOR RUN-{i+1}:")
                 print("-" * 30)
+                # Get trace from THIS instance's callback handler, not from global
+                trace = self._callback_handler.get_trace() if self._callback_handler else []
                 from .capture import print_trace
-                print_trace()
+                print_trace(trace=trace)
                 print("-" * 30)
         
         # Print improvement analysis if we have multiple runs
@@ -3347,6 +3363,7 @@ Follow these rules when planning your actions."""
         
         # Run the agent
         result = self._agent.invoke(*args, **kwargs)
+        print(f"[DASEIN][DEBUG] Agent returned result for step {self._current_step_id}: {str(result.get('input', 'NO_INPUT'))[:80] if isinstance(result, dict) else 'NOT_A_DICT'}")
         
         # Post-run phase: Rule synthesis and learning
         post_run_kpis = self._post_run_phase(query, result, selected_rules, step_number=step_number, is_baseline=is_baseline, total_steps=total_steps or self._retry)
@@ -3358,6 +3375,7 @@ Follow these rules when planning your actions."""
         metrics = post_run_kpis.copy()
         metrics['result'] = result
         metrics['step_id'] = self._current_step_id
+        print(f"[DASEIN][DEBUG] Stored result in metrics for step {self._current_step_id}: {str(metrics['result'].get('input', 'NO_INPUT'))[:80] if isinstance(metrics['result'], dict) else 'NOT_A_DICT'}")
         print(f"[DASEIN] Using KPIs from post-run service for step {self._current_step_id}")
         
         return metrics
@@ -3427,6 +3445,7 @@ Follow these rules when planning your actions."""
         
         # Run the agent asynchronously
         result = await self._agent.ainvoke(*args, **kwargs)
+        print(f"[DASEIN][DEBUG] Agent returned result for step {self._current_step_id}: {str(result.get('input', 'NO_INPUT'))[:80] if isinstance(result, dict) else 'NOT_A_DICT'}")
         
         #  FIXED: Performance tracking mode - extract trace for display but no KPI calculation
         # KPIs will come from post-run service below, not local calculation
@@ -3606,6 +3625,8 @@ Follow these rules when planning your actions."""
     
     def _print_run_metrics(self, metrics, run_name):
         """Print metrics for a single run."""
+        print(f"[DASEIN][DEBUG] _print_run_metrics called for {run_name}, step_id={metrics.get('step_id', 'NO_STEP_ID')}")
+        print(f"[DASEIN][DEBUG] Result in metrics: {str(metrics['result'].get('input', 'NO_INPUT'))[:80] if isinstance(metrics.get('result'), dict) else 'NOT_A_DICT'}")
         print(f"\n {run_name} METRICS:")
         print(f"  LLM Calls: {metrics['llm_calls']}")
         print(f"  Tool Calls: {metrics['tool_calls']}")
@@ -3729,13 +3750,17 @@ Follow these rules when planning your actions."""
         elif turns_improved or tokens_improved or time_improved or success_improved:
             improvements = []
             if turns_improved:
-                improvements.append(f"turns ({first_metrics['total_turns']}{last_metrics['total_turns']})")
+                delta = first_metrics['total_turns'] - last_metrics['total_turns']
+                improvements.append(f"turns (↓{delta})")
             if tokens_improved:
-                improvements.append(f"tokens ({first_metrics['total_tokens']}{last_metrics['total_tokens']})")
+                delta = first_metrics['total_tokens'] - last_metrics['total_tokens']
+                improvements.append(f"tokens (↓{delta})")
             if time_improved:
-                improvements.append(f"time ({first_metrics['trace_time_ms']}{last_metrics['trace_time_ms']}ms)")
+                delta = first_metrics['trace_time_ms'] - last_metrics['trace_time_ms']
+                improvements.append(f"time (↓{delta}ms)")
             if success_improved:
-                improvements.append(f"success rate ({first_metrics['success_rate']:.1f}%{last_metrics['success_rate']:.1f}%)")
+                delta = last_metrics['success_rate'] - first_metrics['success_rate']
+                improvements.append(f"success rate (+{delta:.1f}%)")
             
             print(f"✅ SUCCESS: Dasein improved performance! Improvements: {', '.join(improvements)}")
         else:
