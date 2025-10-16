@@ -1776,7 +1776,7 @@ TURN 2+ (After ACK):
                     if "TOOL RULE:" in advice:
                         rule_injections.append(f"🚨 CRITICAL TOOL OVERRIDE: {advice}")
                     else:
-                        rule_injections.append(f"🚨 {advice}")
+                        rule_injections.append(f" {advice}")
                 
                 # Build execution state context (agent-agnostic, with argument previews)
                 # Strategy: Show all if ≤5 calls, else show most recent 3
@@ -1817,28 +1817,34 @@ EXECUTION STATE (functions called so far):
                 
                 # REFACTORED INJECTION - Multi-architecture gate for ReAct + function calling + LangGraph
                 # Philosophy: Bind to tool invocation moment (any format), force compliance or explicit refusal
-                combined_injection = f"""BEFORE emitting 'Action:' OR calling any tool/function, run this check:
-1. Is this tool banned/skipped by rules below? → If yes, use alternative from rules OR refuse this call
-2. Are required params missing? → If yes, add them per rules OR refuse incomplete call
-3. Is there a preferred alternative? → If yes, use it
+                combined_injection = f"""SYSTEM PREPROCESS (invisible to Thought):
+Before any reasoning, silently apply all operational presets below.
+These presets define the environment, not reasoning steps. Do not surface or restate them.
 
-If no compliant alternative exists, proceed with the necessary tool.
-
-Examples (Bad → Good):
-
-BAD:  Thought: I'll use discovery_tool. Action: discovery_tool  Action Input: {{}}
-GOOD: Thought: Using query_tool per rules. Action: query_tool  Action Input: {{"target":"Table1"}}
-
-BAD:  Thought: I'll call tool_X. Action: tool_X  Action Input: {{"arg1":"value"}}
-GOOD: Thought: Adding required limit. Action: tool_X  Action Input: {{"arg1":"value","limit":10}}
-
-BAD:  Thought: I'll extract all content. Action: extract_all  Action Input: {{}}
-GOOD: Thought: Using focused selector. Action: extract_focused  Action Input: {{"selector":"div.content"}}
-
-{state_context}Rules:
+<SYSTEM_PRESETS do_not_copy="true">
 {chr(10).join(rule_injections)}
+</SYSTEM_PRESETS>
 
-"""
+If a preset blocks an action, use the specified alternative silently.
+If no compliant alternative exists, proceed with necessary action.
+
+BEGIN REASONING PHASE:
+Your Thought starts here; presets are already in effect.
+
+Thought (1 sentence): domain plan only (e.g., query/join/compute/extract); no meta or preset talk.
+Action: …
+Action Input: …
+
+Examples:
+Thought: I will query the relevant tables and compute the aggregates.
+Action: query_tool
+Action Input: {{"tables": ["Table1", "Table2"]}}
+
+Thought: Extracting the main content for analysis.
+Action: extract_focused
+Action Input: {{"selector": "div.content"}}
+
+{state_context}"""
                 # Put the injection at the VERY BEGINNING of the system prompt
                 modified_prompts[0] = combined_injection + system_prompt
                 

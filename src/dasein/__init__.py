@@ -26,9 +26,6 @@ from .api import cognate, inspect_rules, reset_brain
 # Trace tools
 from .capture import print_trace, get_trace, clear_trace
 
-# Rule injection
-from .injector import inject_hint
-
 # Core types and events
 from .types import (
     StepType, CostSource, TokenUsage, TimeWindow, MinimalContext,
@@ -59,9 +56,6 @@ __all__ = [
     "print_trace",
     "get_trace",
     "clear_trace",
-    
-    # Rule injection
-    "inject_hint",
     
     # Types
     "StepType", "CostSource", "TokenUsage", "TimeWindow", "MinimalContext",

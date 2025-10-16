@@ -13,7 +13,6 @@ from langchain_core.exceptions import OutputParserException
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime
 from .events import EventStore
-from .injector import inject_hint
 from .services import ServiceAdapter
 from .config import W_COST
 
@@ -402,36 +401,15 @@ Your response (BLOCK or PASS):"""
             if not output_text:
                 return "failed"  # Empty output means failure
             
-            # Use LLM-based success evaluation
-            from .prompts import success_check
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            from .config import MODEL_RULE_SYNTH
-            import json
+            # Simple heuristic: check for common failure/error patterns
+            output_lower = output_text.lower()
+            failure_patterns = ['error', 'failed', 'could not', 'unable to', 'cannot', 'exception']
             
-            # Create the success evaluation prompt
-            success_prompt = success_check(query, output_text)
-            
-            # Create LLM instance for success evaluation
-            success_llm = ChatGoogleGenerativeAI(
-                model=MODEL_RULE_SYNTH,
-                temperature=0,
-                max_output_tokens=200,
-                response_mime_type="application/json"
-            )
-            
-            # Make the evaluation call (this won't be traced)
-            response = success_llm.invoke([{"role": "user", "content": success_prompt}])
-            
-            logger.debug(f"[DEBUG] Success evaluation response: {repr(response.content)}")
-            
-            # Parse the JSON response
-            result_data = json.loads(response.content)
-            success_value = result_data.get('success', False)
-            
-            if success_value:
-                return "completed"
-            else:
+            if any(pattern in output_lower for pattern in failure_patterns):
                 return "gave_up"
+            
+            # If we have output and no obvious failure, assume completed
+            return "completed"
                 
         except Exception as e:
             logger.debug(f"[DEBUG] Error in _determine_final_outcome: {str(e)}")
