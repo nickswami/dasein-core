@@ -3058,14 +3058,15 @@ Follow these rules when planning your actions."""
             self._last_run_trace = []
         self._vprint(f"[DASEIN][TRACE_CAPTURE] Captured {len(self._last_run_trace)} steps for display")
         
-        # Trigger post-run phase asynchronously (fire-and-forget)
+        # Post-run phase: Get KPIs synchronously (rule synthesis happens async on server)
         # Note: Must do this BEFORE cleanup to preserve trace data
-        self._trigger_async_post_run(query, result, selected_rules)
+        # Server returns KPIs immediately while handling rule synthesis in background
+        self._post_run_phase(query, result, selected_rules)
         
-        # Restore original agent tools after triggering async post-run
+        # Restore original agent tools after post-run
         self._restore_agent_tools()
         
-        # Clear tool rules from system prompt after triggering async post-run
+        # Clear tool rules from system prompt after post-run
         self._clear_tool_rules_from_system()
         
         # Cleanup run-scoped corpus (print telemetry and free memory)
@@ -3147,14 +3148,15 @@ Follow these rules when planning your actions."""
             self._last_run_trace = []
         self._vprint(f"[DASEIN][TRACE_CAPTURE] Captured {len(self._last_run_trace)} steps for display")
         
-        # Trigger post-run phase asynchronously (fire-and-forget)
+        # Post-run phase: Get KPIs synchronously (rule synthesis happens async on server)
         # Note: Must do this BEFORE cleanup to preserve trace data
-        self._trigger_async_post_run(query, result, selected_rules)
+        # Server returns KPIs immediately while handling rule synthesis in background
+        self._post_run_phase(query, result, selected_rules)
         
-        # Restore original agent tools after triggering async post-run
+        # Restore original agent tools after post-run
         self._restore_agent_tools()
         
-        # Clear tool rules from system prompt after triggering async post-run
+        # Clear tool rules from system prompt after post-run
         self._clear_tool_rules_from_system()
         
         # Cleanup run-scoped corpus (print telemetry and free memory)
@@ -4151,23 +4153,6 @@ Follow these rules when planning your actions."""
         except Exception as e:
             print(f"[DASEIN] Error in pre-run phase: {e}")
             return []
-    
-    def _trigger_async_post_run(self, query: str, result: Any, selected_rules: List[Dict[str, Any]]):
-        """Trigger post-run processing asynchronously."""
-        import threading
-        
-        def run_post_phase():
-            try:
-                print(f"[DASEIN] Starting async post-run processing...")
-                self._post_run_phase(query, result, selected_rules)
-                print(f"[DASEIN] Async post-run processing completed")
-            except Exception as e:
-                print(f"[DASEIN] Async post-run processing failed: {e}")
-        
-        # Start post-run in background thread
-        thread = threading.Thread(target=run_post_phase, daemon=True)
-        thread.start()
-        print(f"[DASEIN] Post-run processing started in background thread")
     
     def _post_run_phase(self, query: str, result: Any, selected_rules: List[Dict[str, Any]], 
                        step_number: Optional[int] = None, is_baseline: bool = False, 
