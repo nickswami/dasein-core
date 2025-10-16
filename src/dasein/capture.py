@@ -1822,18 +1822,18 @@ EXECUTION STATE (functions called so far):
 2. Are required params missing? → If yes, add them per rules OR refuse incomplete call
 3. Is there a preferred alternative? → If yes, use it
 
-If rules provide NO compliant alternative for your current need, STOP and explain why this tool is necessary despite rules.
+If no compliant alternative exists, proceed with the necessary tool.
 
 Examples (Bad → Good):
 
 BAD:  Thought: I'll use discovery_tool. Action: discovery_tool  Action Input: {{}}
-GOOD: Thought: Rules say SKIP discovery_tool, schema provided: Table1,Table2 with cols=A,B,C. I'll use query_tool directly. Action: query_tool  Action Input: {{"target":"Table1"}}
+GOOD: Thought: Using query_tool per rules. Action: query_tool  Action Input: {{"target":"Table1"}}
 
 BAD:  Thought: I'll call tool_X. Action: tool_X  Action Input: {{"arg1":"value"}}
-GOOD: Thought: Rules require param 'limit'. Adding it. Action: tool_X  Action Input: {{"arg1":"value","limit":10}}
+GOOD: Thought: Adding required limit. Action: tool_X  Action Input: {{"arg1":"value","limit":10}}
 
 BAD:  Thought: I'll extract all content. Action: extract_all  Action Input: {{}}
-GOOD: Thought: Rules provide focused selector. Action: extract_focused  Action Input: {{"selector":"div.content"}}
+GOOD: Thought: Using focused selector. Action: extract_focused  Action Input: {{"selector":"div.content"}}
 
 {state_context}Rules:
 {chr(10).join(rule_injections)}
