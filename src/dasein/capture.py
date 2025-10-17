@@ -1836,7 +1836,7 @@ Every Thought MUST be immediately followed by Action and Action Input. Never out
 Structure:
 Thought (1 sentence): [brief task reasoning, no preset references]
 Action: [tool_name]
-Action Input: [parameters as JSON, or {{}} if none required]
+Action Input: [tool parameters]
 
 Examples:
 Thought: I will query the relevant tables and compute the aggregates.
