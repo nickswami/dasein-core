@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import requests
 from requests.adapters import HTTPAdapter
+from requests.exceptions import Timeout, ReadTimeout, ConnectTimeout
 from urllib3.util.retry import Retry
 
 from .service_config import ServiceConfig
@@ -123,6 +124,11 @@ class PreRunClient:
                 latency_ms=latency_ms,
                 run_id=self._last_run_id
             )
+            
+        except (Timeout, ReadTimeout, ConnectTimeout) as e:
+            logger.warning(f"Pre-run service timeout after {self.config.request_timeout}s: {e}")
+            # Re-raise to be handled by service_adapter with zero-rule fallback
+            raise
             
         except requests.RequestException as e:
             logger.error(f"Failed to select rules: {e}")

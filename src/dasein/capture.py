@@ -1825,31 +1825,37 @@ These presets define the environment, not reasoning steps. Do not surface or res
 {chr(10).join(rule_injections)}
 </SYSTEM_PRESETS>
 
-If a preset blocks an action, use the specified alternative silently.
-If no compliant alternative exists, proceed with necessary action.
+REQUIRED OUTPUT FORMAT:
 
-BEGIN REASONING PHASE:
-Your Thought starts here; presets are already in effect.
+For each response, output the following three lines:
+Thought: [one sentence about your approach]
+Action: [tool name]
+Action Input: [parameters for the tool]
 
-Every Thought MUST be immediately followed by Action and Action Input. Never output Thought alone.
+Every response MUST include Thought, then Action, then Action Input. Always output all three parts.
+Honor the agent's existing output contract verbatim; do not add or change fields or formatting.
 
-Structure:
-Thought (1 sentence): [brief task reasoning, no preset references]
-Action: [tool_name]
-Action Input: [tool parameters]
+CRITICAL FORMAT RULES:
+- If you encounter errors or repeated failures, you MUST still use Thought/Action/Action Input format - never bypass format with direct answers
+- If a tool returns NULL, None, or empty results AND you used the tool correctly, report that result as the answer - empty results are valid when the query/request was proper
+- You may calculate, aggregate, or derive answers from multiple tool observations, but do not invent data points that were never returned by any tool
 
 Examples:
 Thought: I will query the relevant tables and compute the aggregates.
 Action: query_tool
 Action Input: {{"tables": ["Table1", "Table2"]}}
 
+Thought: Querying the database for order counts.
+Action: sql_db_query
+Action Input: SELECT COUNT(*) FROM orders WHERE date > '2024-01-01'
+
 Thought: Extracting the main content for analysis.
 Action: extract_focused
 Action Input: {{"selector": "div.content"}}
 
-Thought: I have the answer based on the query results.
+Thought: Providing the final result.
 Action: Final Answer
-Action Input: MPEG audio file
+Action Input: Based on the analysis, the value is 42.7 percent with an average of 1250 units.
 
 {state_context}"""
                 # Put the injection at the VERY BEGINNING of the system prompt

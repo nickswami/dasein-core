@@ -4,6 +4,7 @@ Service adapter that replaces in-memory storage with HTTP service calls
 
 import logging
 from typing import List, Dict, Any, Optional
+from requests.exceptions import Timeout, ReadTimeout, ConnectTimeout
 from .service_config import ServiceConfig
 from .pre_run_client import PreRunClient, RuleSelectionRequest
 from .post_run_client import PostRunClient, RuleSynthesisRequest
@@ -84,10 +85,17 @@ class ServiceAdapter:
             logger.info(f"Selected {len(rules)} rules from pre-run service")
             return rules
             
+        except (Timeout, ReadTimeout, ConnectTimeout) as e:
+            logger.warning(f"Pre-run service timeout ({e.__class__.__name__}): {e}")
+            logger.warning("Continuing with zero-rule agent (no pre-run rules)")
+            # Return empty list to proceed without rules
+            return []
+            
         except Exception as e:
             logger.error(f"Failed to select rules from service: {e}")
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
+            logger.warning("Continuing with zero-rule agent (fallback mode)")
             # Return empty list as fallback
             return []
     
