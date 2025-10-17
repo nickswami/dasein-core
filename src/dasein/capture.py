@@ -1831,9 +1831,12 @@ If no compliant alternative exists, proceed with necessary action.
 BEGIN REASONING PHASE:
 Your Thought starts here; presets are already in effect.
 
-Thought (1 sentence): domain plan only (e.g., query/join/compute/extract); no meta or preset talk.
-Action: …
-Action Input: …
+Every Thought MUST be immediately followed by Action and Action Input. Never output Thought alone.
+
+Structure:
+Thought (1 sentence): [brief task reasoning, no preset references]
+Action: [tool_name]
+Action Input: [parameters as JSON, or {{}} if none required]
 
 Examples:
 Thought: I will query the relevant tables and compute the aggregates.
@@ -1843,6 +1846,10 @@ Action Input: {{"tables": ["Table1", "Table2"]}}
 Thought: Extracting the main content for analysis.
 Action: extract_focused
 Action Input: {{"selector": "div.content"}}
+
+Thought: I have the answer based on the query results.
+Action: Final Answer
+Action Input: MPEG audio file
 
 {state_context}"""
                 # Put the injection at the VERY BEGINNING of the system prompt
