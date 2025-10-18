@@ -52,6 +52,7 @@ class DaseinLLMWrapper(BaseChatModel):
         self._callback_handler = callback_handler
         self._trace = []
         self._verbose = verbose
+        self._last_step_full_outcome = None  # Store full untruncated outcome for last step (for success evaluation)
     
     def _vprint(self, message: str, force: bool = False):
         """Helper for verbose printing."""
@@ -153,14 +154,19 @@ class DaseinLLMWrapper(BaseChatModel):
         end_time = datetime.now()
         duration_ms = int((end_time - start_time).total_seconds() * 1000)
         
-        # Extract result text and estimate tokens
+        # Extract FULL result text first (before truncation)
+        full_result_text = self._extract_full_result_text(result)
+        # Store full outcome (up to 20k) for success evaluation
+        self._last_step_full_outcome = full_result_text[:20000] if len(full_result_text) > 20000 else full_result_text
+        
+        # Extract truncated result text for display
         result_text = self._extract_result_text(result)
-        output_tokens = self._estimate_output_tokens(result_text)
+        output_tokens = self._estimate_output_tokens(full_result_text)  # Use full text for accurate token count
         
         # Determine success based on result quality
         success = self._determine_success(result_text, result)
         
-        # Update step with complete metrics
+        # Update step with complete metrics (truncated for display)
         step["outcome"] = result_text
         step["tokens_output"] = output_tokens
         step["duration_ms"] = duration_ms
@@ -280,8 +286,29 @@ Your response (BLOCK or PASS):"""
                 continue
         return "unknown_llm"
     
+    def _extract_full_result_text(self, result):
+        """Extract FULL text from any LLM result format (no truncation)."""
+        try:
+            # Try different result formats
+            if hasattr(result, 'generations') and result.generations:
+                generation = result.generations[0]
+                if hasattr(generation, 'text'):
+                    return generation.text
+                elif hasattr(generation, 'message') and hasattr(generation.message, 'content'):
+                    return generation.message.content
+                else:
+                    return str(generation)
+            elif hasattr(result, 'content'):
+                return result.content
+            elif hasattr(result, 'text'):
+                return result.text
+            else:
+                return str(result)
+        except:
+            return "No result"
+    
     def _extract_result_text(self, result):
-        """Extract text from any LLM result format."""
+        """Extract text from any LLM result format (truncated for display)."""
         try:
             # Try different result formats
             if hasattr(result, 'generations') and result.generations:
@@ -319,12 +346,29 @@ Your response (BLOCK or PASS):"""
         return "dasein_llm_wrapper"
     
     def get_trace(self):
-        """Get the current trace."""
-        return self._trace.copy()
+        """
+        Get the current trace with full outcome (up to 20k chars) for the last step.
+        
+        This allows success evaluation to see more complete output while keeping
+        intermediate steps truncated at 1000 chars for display/logging efficiency.
+        """
+        if not self._trace:
+            return []
+        
+        trace_copy = self._trace.copy()
+        
+        # Replace truncated outcome with full outcome (up to 20k) for last step
+        if self._last_step_full_outcome is not None and trace_copy:
+            # Deep copy last step to avoid mutating original
+            trace_copy[-1] = trace_copy[-1].copy()
+            trace_copy[-1]['outcome'] = self._last_step_full_outcome
+        
+        return trace_copy
     
     def clear_trace(self):
         """Clear the current trace."""
         self._trace.clear()
+        self._last_step_full_outcome = None
     
     def _estimate_input_tokens(self, messages):
         """Estimate input tokens from messages."""

@@ -949,13 +949,9 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called when an LLM ends running."""
-        outcome = ""
+        # Extract FULL outcome first (before truncation)
+        full_outcome = ""
         try:
-            # Debug: Print ALL available data to see what we're getting
-            # print(f"[DEBUG] on_llm_end called")
-            # print(f"  response type: {type(response)}")
-            # print(f"  kwargs keys: {kwargs.keys()}")
-            
             # Try multiple extraction strategies
             # Strategy 1: Standard LangChain LLMResult structure
             if hasattr(response, 'generations') and response.generations:
@@ -966,42 +962,48 @@ class DaseinCallbackHandler(BaseCallbackHandler):
                     else:
                         generation = first_gen
                     
-                    # Try multiple content fields
+                    # Try multiple content fields (extract FULL, not truncated)
                     if hasattr(generation, 'text') and generation.text:
-                        outcome = self._excerpt(generation.text)
+                        full_outcome = str(generation.text)
                     elif hasattr(generation, 'message'):
                         if hasattr(generation.message, 'content'):
-                            outcome = self._excerpt(generation.message.content)
+                            full_outcome = str(generation.message.content)
                         elif hasattr(generation.message, 'text'):
-                            outcome = self._excerpt(generation.message.text)
+                            full_outcome = str(generation.message.text)
                     elif hasattr(generation, 'content'):
-                        outcome = self._excerpt(generation.content)
+                        full_outcome = str(generation.content)
                     else:
-                        outcome = self._excerpt(str(generation))
+                        full_outcome = str(generation)
             
             # Strategy 2: Check if response itself has content
             elif hasattr(response, 'content'):
-                outcome = self._excerpt(response.content)
+                full_outcome = str(response.content)
             
             # Strategy 3: Check kwargs for output/response
             elif 'output' in kwargs:
-                outcome = self._excerpt(str(kwargs['output']))
+                full_outcome = str(kwargs['output'])
             elif 'result' in kwargs:
-                outcome = self._excerpt(str(kwargs['result']))
+                full_outcome = str(kwargs['result'])
             
             # Fallback
-            if not outcome:
-                outcome = self._excerpt(str(response))
-            
-            # Debug: Warn if still empty
-            if not outcome or len(outcome) == 0:
-                self._vprint(f"[DASEIN][CALLBACK] WARNING: on_llm_end got empty outcome!")
-                print(f"  Response: {str(response)[:1000]}")
-                print(f"  kwargs keys: {list(kwargs.keys())}")
+            if not full_outcome:
+                full_outcome = str(response)
                 
         except (AttributeError, IndexError, TypeError) as e:
             self._vprint(f"[DASEIN][CALLBACK] Error in on_llm_end: {e}")
-            outcome = self._excerpt(str(response))
+            full_outcome = str(response)
+        
+        # Store full outcome (up to 20k) for success evaluation
+        self._last_step_full_outcome = full_outcome[:20000] if len(full_outcome) > 20000 else full_outcome
+        
+        # Create truncated version for trace display
+        outcome = self._excerpt(full_outcome)
+        
+        # Debug: Warn if empty
+        if not full_outcome or len(full_outcome) == 0:
+            self._vprint(f"[DASEIN][CALLBACK] WARNING: on_llm_end got empty outcome!")
+            print(f"  Response: {str(response)[:1000]}")
+            print(f"  kwargs keys: {list(kwargs.keys())}")
         
         # # 🎯 PRINT FULL LLM OUTPUT (RAW, UNTRUNCATED) - COMMENTED OUT FOR TESTING
         # node_name = getattr(self, '_current_chain_node', 'agent')
@@ -1140,7 +1142,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
             "step_type": "llm_end",
             "tool_name": "",
             "args_excerpt": "",
-            "outcome": self._excerpt(outcome, max_len=1000),  # Truncate to 1000 chars
+            "outcome": self._excerpt(full_outcome, max_len=1000),  # Truncate to 1000 chars
             "ts": datetime.now().isoformat(),
             "run_id": None,
             "parent_run_id": None,
