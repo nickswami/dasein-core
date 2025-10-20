@@ -359,6 +359,9 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._selected_rules = []  # Rules selected for this run
         self._injection_guard = set()  # Prevent duplicate injections
         self._last_modified_prompts = []  # Store modified prompts for LLM wrapper
+        self._last_injection_delta = None  # Store ONLY the injection delta (rules + formatting)
+        self._delta_applied_turn = -1  # Track which turn we applied delta to (for idempotence)
+        self._llm_call_counter = 0  # Track LLM call number within current run (resets each run)
         self._llm = llm  # Store reference to LLM for micro-turn calls
         self._tool_name_by_run_id = {}  # Track tool names by run_id
         self._discovered_tools = set()  # Track tools discovered during execution
@@ -420,6 +423,7 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         self._injection_guard = set()
         self._trace = []  # Clear instance trace
         self._start_times = {}  # Clear start times
+        self._llm_call_counter = 0  # Reset LLM call counter for new run
         self._run_number = getattr(self, '_run_number', 1) + 1  # Increment run number
         self._vprint(f"[DASEIN][CALLBACK] Reset run state (trace, function calls, injection guard, and start times cleared) - now on RUN {self._run_number}")
     
@@ -691,6 +695,9 @@ class DaseinCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called when an LLM starts running."""
+        # Increment LLM call counter for this run
+        self._llm_call_counter += 1
+        
         model_name = serialized.get("name", "unknown") if serialized else "unknown"
         
         # PIPECLEANER: Intercept Summary LLM calls
@@ -1863,6 +1870,11 @@ Action Input: Based on the analysis, the value is 42.7 percent with an average o
 {state_context}"""
                 # Put the injection at the VERY BEGINNING of the system prompt
                 modified_prompts[0] = combined_injection + system_prompt
+                
+                # 🔧 FIX: Store injection delta for api.py to apply surgically
+                # This prevents token snowball by allowing api.py to inject ONLY the delta
+                # into messages[0], not the entire serialized conversation
+                self._last_injection_delta = combined_injection
                 
                 # Add to guard (only if we're using the guard)
                 if use_guard:

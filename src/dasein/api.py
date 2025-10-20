@@ -122,30 +122,60 @@ class DaseinLLMWrapper(BaseChatModel):
                 self._vprint(f"[DASEIN][WRAPPER] Original first prompt: {prompts[0][:100]}...")
                 self._vprint(f"[DASEIN][WRAPPER] Modified first prompt: {modified_prompts[0][:100]}...")
                 
-                # Reconstruct messages from modified prompts
-                new_messages = []
-                for i, prompt in enumerate(modified_prompts):
-                    if i < len(messages):
-                        # Update existing message content, preserving the original message type
-                        if hasattr(messages[i], 'content'):
-                            messages[i].content = prompt
-                        else:
-                            messages[i] = type(messages[i])(content=prompt)
-                        new_messages.append(messages[i])
+                # 🔧 FIX: Apply ONLY the injection delta via deep copy (never mutate originals)
+                # This prevents token snowball by not writing LangChain's serialized conversation back
+                injection_delta = getattr(self._callback_handler, '_last_injection_delta', None)
+                # Use callback handler's LLM call counter (resets each run)
+                llm_call_num = getattr(self._callback_handler, '_llm_call_counter', 0)
+                delta_applied_turn = getattr(self._callback_handler, '_delta_applied_turn', -1)
+                
+                if injection_delta and delta_applied_turn != llm_call_num:
+                    # Deep copy messages to avoid mutating LangChain's internal state
+                    import copy
+                    from langchain_core.messages import SystemMessage
+                    
+                    new_messages = copy.deepcopy(messages)
+                    
+                    # Find first system message or create one
+                    if new_messages and hasattr(new_messages[0], 'type') and new_messages[0].type == 'system':
+                        # Prepend delta to existing system message
+                        new_messages[0].content = injection_delta + new_messages[0].content
+                    elif new_messages:
+                        # Insert new system message at index 0
+                        new_messages.insert(0, SystemMessage(content=injection_delta))
                     else:
-                        # Create new message - preserve the original message type
-                        from langchain_core.messages import HumanMessage, SystemMessage
-                        if i == 0:  # First message should be system prompt
-                            new_messages.append(SystemMessage(content=prompt))
-                        else:
-                            new_messages.append(HumanMessage(content=prompt))
-                messages = new_messages
-                self._vprint(f"[DASEIN][WRAPPER] Using modified messages for LLM call")
+                        # Edge case: empty messages
+                        new_messages = [SystemMessage(content=injection_delta)]
+                    
+                    messages = new_messages
+                    
+                    # Mark this turn as applied (idempotence)
+                    self._callback_handler._delta_applied_turn = llm_call_num
+                    
+                    print(f"[DASEIN][SNOWBALL-FIX] LLM Call {llm_call_num}: ✅ Applied {len(injection_delta)} char injection delta via deep copy")
+                    print(f"[DASEIN][SNOWBALL-FIX] LLM Call {llm_call_num}: Total messages: {len(messages)}")
+                    self._vprint(f"[DASEIN][WRAPPER] ✅ Applied {len(injection_delta)} char injection delta via deep copy")
+                else:
+                    self._vprint(f"[DASEIN][WRAPPER] ⚠️  No injection delta available or already applied this turn")
             else:
                 self._vprint(f"[DASEIN][WRAPPER] No prompt modifications applied")
         
         # Update token count with the actual messages that will be sent to LLM
         step["tokens_input"] = self._estimate_input_tokens(messages)
+        
+        # Track token growth to detect snowball
+        llm_call_num = getattr(self._callback_handler, '_llm_call_counter', 0)
+        tokens_input = step["tokens_input"]
+        
+        # Calculate growth from previous turn
+        llm_steps = [s for s in self._trace if s.get('step_type') == 'llm_start']
+        if llm_steps:
+            prev_tokens = llm_steps[-1].get('tokens_input', 0)
+            growth = tokens_input - prev_tokens
+            growth_pct = (growth / prev_tokens * 100) if prev_tokens > 0 else 0
+            print(f"[DASEIN][SNOWBALL-FIX] LLM Call {llm_call_num}: {tokens_input} tokens ({len(messages)} msgs) | Growth: {growth:+d} ({growth_pct:+.1f}%)")
+        else:
+            print(f"[DASEIN][SNOWBALL-FIX] LLM Call {llm_call_num}: {tokens_input} tokens ({len(messages)} msgs) | First call")
         
         # Call the original LLM with potentially modified messages
         result = self._llm._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
