@@ -1830,17 +1830,18 @@ These presets define the environment, not reasoning steps. Do not surface or res
 REQUIRED OUTPUT FORMAT:
 
 For each response, output the following three lines:
-Thought: [one sentence about your approach]
+Thought: [briefly describe your approach without repeating rules or payloads]
 Action: [tool name]
 Action Input: [parameters for the tool]
 
 Every response MUST include Thought, then Action, then Action Input. Always output all three parts.
-Honor the agent's existing output contract verbatim; do not add or change fields or formatting.
+Honor the agent's existing output contract faithfully; do not add or change fields or formatting.
 
 CRITICAL FORMAT RULES:
 - If you encounter errors or repeated failures, you MUST still use Thought/Action/Action Input format - never bypass format with direct answers
+- You may reference large tool outputs without repeating them - there is no need to re-state full result sets in your reasoning
 - If a tool returns NULL, None, or empty results AND you used the tool correctly, report that result as the answer - empty results are valid when the query/request was proper
-- You may calculate, aggregate, or derive answers from multiple tool observations, but do not invent data points that were never returned by any tool
+- You may calculate, aggregate, or derive answers based on relevant tool observations, but do not invent data points unsupported by tool outputs
 
 Examples:
 Thought: I will query the relevant tables and compute the aggregates.
