@@ -1838,15 +1838,18 @@ REQUIRED OUTPUT FORMAT:
 
 For each response, output the following three lines:
 Thought: [briefly describe your approach without repeating rules or payloads]
-Action: [tool name] or [final answer]
-Action Input: [parameters for the tool] or [final answer details]
+Action: [tool name] or Final Answer
+Action Input: [parameters for the tool, e.g., SQL queries, code, search strings, JSON objects, file paths] or [final answer details]
 
 Every response MUST include Thought, then Action, then Action Input. Always output all three parts.
 Honor the agent's existing output contract faithfully; do not add or change fields or formatting unless it violates Thought/Action/Action Input format.
 
 CRITICAL FORMAT RULES:
 - If you encounter errors or repeated failures, you MUST still use Thought/Action/Action Input format - never bypass format with direct answers
-- Never output bare text like "I don't know" - even uncertainty requires the Thought/Action/Action Input format 
+- Never output bare text like "I don't know" - even uncertainty requires the Thought/Action/Action Input format
+- All intermediate steps and tool calls MUST use Thought/Action/Action Input format - never output queries, code, thoughts, or actions directly
+- When you have a valid answer, output using Action: Final Answer with details in Action Input - never output the final answer as bare text
+- When producing a final summary, report, analysis, or table as your answer, use Action: Final Answer with the entire content in Action Input
 - You may reference large tool outputs without repeating them - there is no need to re-state full result sets in your reasoning
 - If a tool returns NULL, None, or empty results AND you used the tool correctly, report that result as the answer using Action: Final Answer (put details in Action Input)
 - If tools or data cannot support the task (e.g., missing columns, unavailable resources, insufficient data to answer) and you have exhausted reasonable alternatives, use Action: Final Answer with explanation in Action Input
@@ -1876,6 +1879,9 @@ Action Input: Cannot complete: Error "no such column: customer_revenue" - attemp
 Thought: The available data does not contain the information needed to answer this question.
 Action: Final Answer
 Action Input: I don't know - the data source does not contain the required information to answer this query.
+
+FINAL REMINDER: Every response requires exactly three lines: Thought, Action, Action Input.
+Never output bare text.
 
 {state_context}"""
                 # Put the injection at the VERY BEGINNING of the system prompt
