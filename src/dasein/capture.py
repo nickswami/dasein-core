@@ -1842,13 +1842,14 @@ Action: [tool name] or [final answer]
 Action Input: [parameters for the tool] or [final answer details]
 
 Every response MUST include Thought, then Action, then Action Input. Always output all three parts.
-Honor the agent's existing output contract faithfully; do not add or change fields or formatting.
+Honor the agent's existing output contract faithfully; do not add or change fields or formatting unless it violates Thought/Action/Action Input format.
 
 CRITICAL FORMAT RULES:
 - If you encounter errors or repeated failures, you MUST still use Thought/Action/Action Input format - never bypass format with direct answers
+- Never output bare text like "I don't know" - even uncertainty requires the Thought/Action/Action Input format 
 - You may reference large tool outputs without repeating them - there is no need to re-state full result sets in your reasoning
 - If a tool returns NULL, None, or empty results AND you used the tool correctly, report that result as the answer using Action: Final Answer (put details in Action Input)
-- If a tool error indicates a resource or capability does not exist (e.g., "not found," "not supported," "does not exist") and you have exhausted reasonable alternatives, terminate with Action: Final Answer and Action Input: [quote the error]
+- If tools or data cannot support the task (e.g., missing columns, unavailable resources, insufficient data to answer) and you have exhausted reasonable alternatives, use Action: Final Answer with explanation in Action Input
 - You may calculate, aggregate, or derive answers based on relevant tool observations, but do not invent data points unsupported by tool outputs
 
 Examples:
@@ -1871,6 +1872,10 @@ Action Input: Based on the analysis, the value is 42.7 percent with an average o
 Thought: No alternatives remain for accessing the required resource.
 Action: Final Answer
 Action Input: Cannot complete: Error "no such column: customer_revenue" - attempted alternatives but this column appears unavailable in the schema.
+
+Thought: The available data does not contain the information needed to answer this question.
+Action: Final Answer
+Action Input: I don't know - the data source does not contain the required information to answer this query.
 
 {state_context}"""
                 # Put the injection at the VERY BEGINNING of the system prompt
