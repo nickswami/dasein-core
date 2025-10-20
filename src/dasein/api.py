@@ -152,8 +152,6 @@ class DaseinLLMWrapper(BaseChatModel):
                     # Mark this turn as applied (idempotence)
                     self._callback_handler._delta_applied_turn = llm_call_num
                     
-                    print(f"[DASEIN][SNOWBALL-FIX] LLM Call {llm_call_num}: ✅ Applied {len(injection_delta)} char injection delta via deep copy")
-                    print(f"[DASEIN][SNOWBALL-FIX] LLM Call {llm_call_num}: Total messages: {len(messages)}")
                     self._vprint(f"[DASEIN][WRAPPER] ✅ Applied {len(injection_delta)} char injection delta via deep copy")
                 else:
                     self._vprint(f"[DASEIN][WRAPPER] ⚠️  No injection delta available or already applied this turn")
@@ -162,20 +160,6 @@ class DaseinLLMWrapper(BaseChatModel):
         
         # Update token count with the actual messages that will be sent to LLM
         step["tokens_input"] = self._estimate_input_tokens(messages)
-        
-        # Track token growth to detect snowball
-        llm_call_num = getattr(self._callback_handler, '_llm_call_counter', 0)
-        tokens_input = step["tokens_input"]
-        
-        # Calculate growth from previous turn
-        llm_steps = [s for s in self._trace if s.get('step_type') == 'llm_start']
-        if llm_steps:
-            prev_tokens = llm_steps[-1].get('tokens_input', 0)
-            growth = tokens_input - prev_tokens
-            growth_pct = (growth / prev_tokens * 100) if prev_tokens > 0 else 0
-            print(f"[DASEIN][SNOWBALL-FIX] LLM Call {llm_call_num}: {tokens_input} tokens ({len(messages)} msgs) | Growth: {growth:+d} ({growth_pct:+.1f}%)")
-        else:
-            print(f"[DASEIN][SNOWBALL-FIX] LLM Call {llm_call_num}: {tokens_input} tokens ({len(messages)} msgs) | First call")
         
         # Call the original LLM with potentially modified messages
         result = self._llm._generate(messages, stop=stop, run_manager=run_manager, **kwargs)

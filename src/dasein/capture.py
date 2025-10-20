@@ -1838,8 +1838,8 @@ REQUIRED OUTPUT FORMAT:
 
 For each response, output the following three lines:
 Thought: [briefly describe your approach without repeating rules or payloads]
-Action: [tool name]
-Action Input: [parameters for the tool]
+Action: [tool name] or [final answer]
+Action Input: [parameters for the tool] or [final answer details]
 
 Every response MUST include Thought, then Action, then Action Input. Always output all three parts.
 Honor the agent's existing output contract faithfully; do not add or change fields or formatting.
