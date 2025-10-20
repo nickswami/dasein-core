@@ -1847,7 +1847,8 @@ Honor the agent's existing output contract faithfully; do not add or change fiel
 CRITICAL FORMAT RULES:
 - If you encounter errors or repeated failures, you MUST still use Thought/Action/Action Input format - never bypass format with direct answers
 - You may reference large tool outputs without repeating them - there is no need to re-state full result sets in your reasoning
-- If a tool returns NULL, None, or empty results AND you used the tool correctly, report that result as the answer - empty results are valid when the query/request was proper
+- If a tool returns NULL, None, or empty results AND you used the tool correctly, report that result as the answer using Action: Final Answer (put details in Action Input)
+- If a tool error indicates a resource or capability does not exist (e.g., "not found," "not supported," "does not exist") and you have exhausted reasonable alternatives, terminate with Action: Final Answer and Action Input: [quote the error]
 - You may calculate, aggregate, or derive answers based on relevant tool observations, but do not invent data points unsupported by tool outputs
 
 Examples:
@@ -1866,6 +1867,10 @@ Action Input: {{"selector": "div.content"}}
 Thought: Providing the final result.
 Action: Final Answer
 Action Input: Based on the analysis, the value is 42.7 percent with an average of 1250 units.
+
+Thought: No alternatives remain for accessing the required resource.
+Action: Final Answer
+Action Input: Cannot complete: Error "no such column: customer_revenue" - attempted alternatives but this column appears unavailable in the schema.
 
 {state_context}"""
                 # Put the injection at the VERY BEGINNING of the system prompt
