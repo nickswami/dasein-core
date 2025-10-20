@@ -46,12 +46,13 @@ def _vprint(message: str, verbose: bool = False, force: bool = False):
 class DaseinLLMWrapper(BaseChatModel):
     """Wrapper around any LLM that captures traces for Dasein."""
     
-    def __init__(self, llm, callback_handler: DaseinCallbackHandler, verbose: bool = False):
+    def __init__(self, llm, callback_handler: DaseinCallbackHandler, verbose: bool = False, react_agent: bool = True):
         super().__init__()
         self._llm = llm
         self._callback_handler = callback_handler
         self._trace = []
         self._verbose = verbose
+        self._react_agent = react_agent  # Enable ReAct format enforcement
         self._last_step_full_outcome = None  # Store full untruncated outcome for last step (for success evaluation)
     
     def _vprint(self, message: str, force: bool = False):
@@ -272,6 +273,32 @@ Your response (BLOCK or PASS):"""
                 import traceback
                 traceback.print_exc()
         
+        # ReAct format enforcement (only if enabled and rules present)
+        if self._react_agent and self._callback_handler and hasattr(self._callback_handler, '_selected_rules'):
+            selected_rules = getattr(self._callback_handler, '_selected_rules', [])
+            if selected_rules and len(selected_rules) > 0:
+                # Check if output has proper ReAct format
+                is_valid = self._has_react_format(full_result_text)
+                
+                # Log format check (verbose mode only)
+                self._vprint(f"[DASEIN][REACT_FIX] Format check: {'✓ VALID' if is_valid else '✗ INVALID'}")
+                self._vprint(f"[DASEIN][REACT_FIX] Output preview: {full_result_text[:150]}...")
+                
+                if not is_valid:
+                    self._vprint(f"[DASEIN][REACT_FIX] Malformed output detected, fixing format...")
+                    
+                    # Get available tools
+                    available_tools = self._get_available_tools()
+                    
+                    # Fix the format using microturn LLM
+                    fixed_text = self._fix_react_format(full_result_text, available_tools)
+                    
+                    # Modify result object with fixed content
+                    if fixed_text != full_result_text:
+                        self._modify_result_content(result, fixed_text)
+                        self._vprint(f"[DASEIN][REACT_FIX] Format fixed successfully")
+                        self._vprint(f"[DASEIN][REACT_FIX] Fixed output: {fixed_text[:100]}...")
+        
         # Trigger on_llm_end callback
         if self._callback_handler:
             self._callback_handler.on_llm_end(
@@ -439,6 +466,225 @@ Your response (BLOCK or PASS):"""
         except:
             return False
     
+    def _has_react_format(self, text: str) -> bool:
+        """
+        Check if text matches the required ReAct format.
+        
+        Valid formats:
+        1. Tool call: "Thought:" + "Action:" + "Action Input:" (all 3 required - ReAct = Reasoning + Acting!)
+        2. Final answer (standalone): Just "Final Answer:" (when not a tool)
+        
+        Args:
+            text: The text to check
+            
+        Returns:
+            True if text has proper ReAct format, False otherwise
+        """
+        try:
+            # Split into lines and check for format markers at line starts
+            lines = text.strip().split('\n')
+            
+            # Look for lines starting with the format markers (after stripping whitespace)
+            has_thought = any(line.strip().lower().startswith('thought:') for line in lines)
+            has_action = any(line.strip().lower().startswith('action:') for line in lines)
+            has_action_input = any(line.strip().lower().startswith('action input:') for line in lines)
+            
+            # Valid format 1: Thought + Action + Action Input (ALL 3 required for ReAct!)
+            if has_thought and has_action and has_action_input:
+                # Find line indices
+                thought_line = next((i for i, line in enumerate(lines) if line.strip().lower().startswith('thought:')), -1)
+                action_line = next((i for i, line in enumerate(lines) if line.strip().lower().startswith('action:')), -1)
+                action_input_line = next((i for i, line in enumerate(lines) if line.strip().lower().startswith('action input:')), -1)
+                
+                # Ensure ordering: Thought < Action < Action Input
+                if thought_line < action_line < action_input_line:
+                    return True
+            
+            # Valid format 2: Standalone final answer (at line start, no action field)
+            has_final_answer = any(line.strip().lower().startswith('final answer:') for line in lines)
+            if has_final_answer and not has_action:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self._vprint(f"[DASEIN][REACT_FIX] Error checking format: {e}")
+            return True  # If we can't check, assume it's fine
+    
+    def _get_available_tools(self) -> list:
+        """
+        Get tool names using existing tool extraction infrastructure.
+        
+        Returns:
+            List of actual tool names (NOT including "Final Answer" - that's not a tool!)
+        """
+        tools = []
+        
+        try:
+            # Use already-extracted tools from callback handler
+            if self._callback_handler and hasattr(self._callback_handler, '_compiled_tools_metadata'):
+                compiled_tools = self._callback_handler._compiled_tools_metadata
+                if compiled_tools:
+                    tools = [tool['name'] for tool in compiled_tools]
+                    self._vprint(f"[DASEIN][REACT_FIX] Using {len(tools)} compiled tools from callback handler")
+            
+            # If not extracted yet, call the extract function
+            if not tools and self._callback_handler:
+                if hasattr(self._callback_handler, '_extract_tools_fn') and self._callback_handler._extract_tools_fn:
+                    if hasattr(self._callback_handler, '_agent') and self._callback_handler._agent:
+                        tools_metadata = self._callback_handler._extract_tools_fn(self._callback_handler._agent)
+                        tools = [tool['name'] for tool in tools_metadata]
+                        self._vprint(f"[DASEIN][REACT_FIX] Extracted {len(tools)} tools on-demand")
+            
+        except Exception as e:
+            self._vprint(f"[DASEIN][REACT_FIX] Error getting tools: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback: empty list
+            tools = []
+        
+        return tools
+    
+    def _fix_react_format(self, text: str, tools: list) -> str:
+        """
+        Fix malformed ReAct output using microturn LLM.
+        
+        Creates a prompt asking the LLM to fix the format, then calls the LLM
+        and returns the corrected output.
+        
+        Args:
+            text: The malformed output text
+            tools: List of available tool names (as-is from agent, may include "Final Answer")
+            
+        Returns:
+            Fixed output text in proper ReAct format
+        """
+        try:
+            tools_list = "\n".join(tools) if tools else "No tools available"
+            
+            # Check if "Final Answer" is in the tools list
+            has_final_answer_tool = any(t.lower() == "final answer" for t in tools)
+            
+            if has_final_answer_tool:
+                # If Final Answer is a tool, use 3-line format
+                prompt = f"""You are a format compliance fixer for a ReAct agent.
+
+AVAILABLE TOOLS:
+{tools_list}
+
+REQUIRED FORMAT (three lines):
+Thought: [description]
+Action: [tool name from list above]
+Action Input: [parameters or final answer content]
+
+EXAMPLES:
+
+Tool call:
+Thought: I will query the relevant tables.
+Action: sql_db_query
+Action Input: SELECT COUNT(*) FROM orders
+
+Final answer (using Final Answer tool):
+Thought: Providing the final result.
+Action: Final Answer
+Action Input: Based on the analysis, the value is 42.7 percent with an average of 1250 units.
+
+MALFORMED OUTPUT:
+{text}
+
+TASK: Fix the output to match the required 3-line format (Thought/Action/Action Input). If it's missing Thought, add one. If it's missing Action or Action Input, add them. Output ONLY the fixed three lines, nothing else.
+
+FIXED OUTPUT:"""
+            else:
+                # If Final Answer is NOT a tool, use standalone format
+                prompt = f"""You are a format compliance fixer for a ReAct agent.
+
+AVAILABLE TOOLS:
+{tools_list}
+
+VALID OUTPUT FORMATS:
+
+Format 1 - Tool Call (three lines):
+Thought: [description]
+Action: [tool name from list above]
+Action Input: [parameters for the tool]
+
+Format 2 - Final Answer (one line):
+Final Answer: [the answer]
+
+EXAMPLES:
+
+Tool call:
+Thought: I will query the relevant tables.
+Action: sql_db_query
+Action Input: SELECT COUNT(*) FROM orders
+
+Final answer:
+Final Answer: Based on the analysis, the value is 42.7 percent with an average of 1250 units.
+
+MALFORMED OUTPUT:
+{text}
+
+TASK: Fix the output to match one of the valid formats. If it looks like a final answer, use Format 2. If it's calling a tool, use Format 1. Output ONLY the fixed format, nothing else.
+
+FIXED OUTPUT:"""
+            
+            # Call the LLM with this prompt
+            self._vprint(f"[DASEIN][REACT_FIX] Calling microturn LLM to fix format...")
+            
+            from langchain_core.messages import HumanMessage
+            messages_for_microturn = [HumanMessage(content=prompt)]
+            microturn_response = self._llm.invoke(messages_for_microturn)
+            
+            # Extract the fixed text
+            if hasattr(microturn_response, 'content'):
+                fixed_text = microturn_response.content.strip()
+            else:
+                fixed_text = str(microturn_response).strip()
+            
+            # Validate the fixed text has the format
+            if self._has_react_format(fixed_text):
+                self._vprint(f"[DASEIN][REACT_FIX] Successfully fixed format")
+                return fixed_text
+            else:
+                self._vprint(f"[DASEIN][REACT_FIX] Fix attempt didn't produce valid format, returning original")
+                return text
+            
+        except Exception as e:
+            self._vprint(f"[DASEIN][REACT_FIX] Error fixing format: {e}")
+            import traceback
+            traceback.print_exc()
+            return text  # Return original if fix fails
+    
+    def _modify_result_content(self, result, new_content: str) -> None:
+        """
+        Modify the result object's content field with fixed text.
+        
+        Args:
+            result: The LLM result object to modify
+            new_content: The new content to set
+        """
+        try:
+            if hasattr(result, 'generations') and result.generations:
+                first_gen = result.generations[0]
+                if isinstance(first_gen, list) and len(first_gen) > 0:
+                    # generations[0] is a list
+                    if hasattr(first_gen[0], 'message'):
+                        first_gen[0].message.content = new_content
+                    elif hasattr(first_gen[0], 'text'):
+                        first_gen[0].text = new_content
+                elif hasattr(first_gen, 'message'):
+                    # generations[0] is a single generation
+                    first_gen.message.content = new_content
+                elif hasattr(first_gen, 'text'):
+                    first_gen.text = new_content
+                
+                self._vprint(f"[DASEIN][REACT_FIX] Successfully modified result content")
+        except Exception as e:
+            self._vprint(f"[DASEIN][REACT_FIX] Error modifying result: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def _determine_final_outcome(self, result, query=None):
         """Determine if the agent completed the task or gave up using LLM-based evaluation."""
         try:
@@ -529,7 +775,7 @@ def _get_event_store() -> EventStore:
 
 
 
-def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None, top_k=5):
+def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None, top_k=5, react_agent=True):
     """
     Wrap an agent with Dasein's memory capabilities.
     
@@ -550,6 +796,7 @@ def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking
         performance_tracking_id: Optional custom performance tracking ID for grouping related runs. 
                                 If None, auto-generates a unique ID. Use same ID to share learnings across queries.
         top_k: Maximum number of rules to select per layer (default: 5)
+        react_agent: If True, enable ReAct format enforcement to fix malformed LLM outputs (default: True)
         
     Returns:
         A proxy object with .run() and .invoke() methods
@@ -563,7 +810,7 @@ def cognate(agent, *, weights=None, verbose=False, retry=1, performance_tracking
         agent = agent._agent  # Unwrap to get original agent
     
     global _global_cognate_proxy
-    _global_cognate_proxy = CognateProxy(agent, weights=weights, verbose=verbose, retry=retry, performance_tracking=performance_tracking, rule_trace=rule_trace, post_run=post_run, performance_tracking_id=performance_tracking_id, top_k=top_k)
+    _global_cognate_proxy = CognateProxy(agent, weights=weights, verbose=verbose, retry=retry, performance_tracking=performance_tracking, rule_trace=rule_trace, post_run=post_run, performance_tracking_id=performance_tracking_id, top_k=top_k, react_agent=react_agent)
     return _global_cognate_proxy
 
 
@@ -847,7 +1094,7 @@ class CognateProxy:
     Proxy that wraps a LangChain agent and implements the complete Dasein pipeline.
     """
     
-    def __init__(self, agent, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None, top_k=5):
+    def __init__(self, agent, weights=None, verbose=False, retry=1, performance_tracking=False, rule_trace=False, post_run="full", performance_tracking_id=None, top_k=5, react_agent=True):
         self._agent = agent
         self._weights = weights or W_COST
         self._verbose = verbose
@@ -856,6 +1103,7 @@ class CognateProxy:
         self._rule_trace = rule_trace
         self._post_run = post_run  # "full" or "kpi_only"
         self._top_k = top_k  # Maximum number of rules to select per layer
+        self._react_agent = react_agent  # Enable ReAct format enforcement
         # Ensure naive flag exists (legacy code path)
         self._naive = False
         #  CRITICAL: LangGraph Detection & Parameter Extraction
@@ -1762,7 +2010,7 @@ Follow these rules when planning your actions."""
                 self._vprint(f"[DASEIN][WRAPPER] Using wrapper strategy (SQL/WebBrowse)")
                 llm = self._find_llm_recursively(self._agent, max_depth=5)
                 if llm:
-                    wrapped_llm = DaseinLLMWrapper(llm, self._callback_handler, verbose=self._verbose)
+                    wrapped_llm = DaseinLLMWrapper(llm, self._callback_handler, verbose=self._verbose, react_agent=self._react_agent)
                     self._replace_llm_in_structure(self._agent, llm, wrapped_llm, max_depth=5)
                     self._wrapped_llm = wrapped_llm
                     self._vprint(f"[DASEIN][WRAPPER] Successfully wrapped {type(llm).__name__} LLM")

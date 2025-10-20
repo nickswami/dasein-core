@@ -1836,51 +1836,54 @@ These presets define the environment, not reasoning steps. Do not surface or res
 
 REQUIRED OUTPUT FORMAT:
 
-For each response, output the following three lines:
+Format 1 - Tool Call (three lines):
 Thought: [briefly describe your approach without repeating rules or payloads]
-Action: [tool name] or Final Answer
-Action Input: [parameters for the tool, e.g., SQL queries, code, search strings, JSON objects, file paths] or [final answer details]
+Action: [tool name from available tools]
+Action Input: [parameters for the tool, e.g., SQL queries, code, search strings, JSON objects, file paths]
 
-Every response MUST include Thought, then Action, then Action Input. Always output all three parts.
-Honor the agent's existing output contract faithfully; do not add or change fields or formatting unless it violates Thought/Action/Action Input format.
+Format 2 - Final Answer (one line):
+Final Answer: [your complete answer]
+
+Honor the agent's existing output contract faithfully; do not add or change fields or formatting unless it violates these formats.
 
 CRITICAL FORMAT RULES:
-- If you encounter errors or repeated failures, you MUST still use Thought/Action/Action Input format - never bypass format with direct answers
-- Never output bare text like "I don't know" - even uncertainty requires the Thought/Action/Action Input format
-- All intermediate steps and tool calls MUST use Thought/Action/Action Input format - never output queries, code, thoughts, or actions directly
-- When you have a valid answer, output using Action: Final Answer with details in Action Input - never output the final answer as bare text
-- When producing a final summary, report, analysis, or table as your answer, use Action: Final Answer with the entire content in Action Input
+- If you encounter errors or repeated failures, you MUST still use Format 1 (Thought/Action/Action Input) - never bypass format with direct answers
+- Never output bare text like "I don't know" - use one of the two valid formats
+- All intermediate steps and tool calls MUST use Format 1 (Thought/Action/Action Input) - never output queries, code, thoughts, or actions directly
+- When you have a valid answer, use Format 2 (Final Answer:) - NOT Action: Final Answer!
+- When producing a final summary, report, analysis, or table as your answer, use Format 2 with the entire content after "Final Answer:"
 - You may reference large tool outputs without repeating them - there is no need to re-state full result sets in your reasoning
-- If a tool returns NULL, None, or empty results AND you used the tool correctly, report that result as the answer using Action: Final Answer (put details in Action Input)
-- If tools or data cannot support the task (e.g., missing columns, unavailable resources, insufficient data to answer) and you have exhausted reasonable alternatives, use Action: Final Answer with explanation in Action Input
+- If a tool returns NULL, None, or empty results AND you used the tool correctly, report that using Format 2
+- If tools or data cannot support the task (e.g., missing columns, unavailable resources, insufficient data to answer) and you have exhausted reasonable alternatives, use Format 2 with explanation
 - You may calculate, aggregate, or derive answers based on relevant tool observations, but do not invent data points unsupported by tool outputs
 
 Examples:
+
+Tool call:
 Thought: I will query the relevant tables and compute the aggregates.
 Action: query_tool
 Action Input: {{"tables": ["Table1", "Table2"]}}
 
+Tool call:
 Thought: Querying the database for order counts.
 Action: sql_db_query
 Action Input: SELECT COUNT(*) FROM orders WHERE date > '2024-01-01'
 
+Tool call:
 Thought: Extracting the main content for analysis.
 Action: extract_focused
 Action Input: {{"selector": "div.content"}}
 
-Thought: Providing the final result.
-Action: Final Answer
-Action Input: Based on the analysis, the value is 42.7 percent with an average of 1250 units.
+Final answer:
+Final Answer: Based on the analysis, the value is 42.7 percent with an average of 1250 units.
 
-Thought: No alternatives remain for accessing the required resource.
-Action: Final Answer
-Action Input: Cannot complete: Error "no such column: customer_revenue" - attempted alternatives but this column appears unavailable in the schema.
+Final answer:
+Final Answer: Cannot complete: Error "no such column: customer_revenue" - attempted alternatives but this column appears unavailable in the schema.
 
-Thought: The available data does not contain the information needed to answer this question.
-Action: Final Answer
-Action Input: I don't know - the data source does not contain the required information to answer this query.
+Final answer:
+Final Answer: I don't know - the data source does not contain the required information to answer this query.
 
-FINAL REMINDER: Every response requires exactly three lines: Thought, Action, Action Input.
+FINAL REMINDER: Use Format 1 (Thought/Action/Action Input) for tool calls, Format 2 (Final Answer:) for answers.
 Never output bare text.
 
 {state_context}"""
