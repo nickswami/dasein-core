@@ -471,8 +471,9 @@ Your response (BLOCK or PASS):"""
         Check if text matches the required ReAct format.
         
         Valid formats:
-        1. Tool call: "Thought:" + "Action:" + "Action Input:" (all 3 required - ReAct = Reasoning + Acting!)
-        2. Final answer (standalone): Just "Final Answer:" (when not a tool)
+        1. Full ReAct: "Thought:" + "Action:" + "Action Input:" (ideal, has reasoning)
+        2. Minimal valid: "Action:" + "Action Input:" (not ideal but acceptable - avoids expensive microturn)
+        3. Final answer (standalone): Just "Final Answer:" (when not a tool)
         
         Args:
             text: The text to check
@@ -489,7 +490,7 @@ Your response (BLOCK or PASS):"""
             has_action = any(line.strip().lower().startswith('action:') for line in lines)
             has_action_input = any(line.strip().lower().startswith('action input:') for line in lines)
             
-            # Valid format 1: Thought + Action + Action Input (ALL 3 required for ReAct!)
+            # Valid format 1: Thought + Action + Action Input (ideal ReAct format)
             if has_thought and has_action and has_action_input:
                 # Find line indices
                 thought_line = next((i for i, line in enumerate(lines) if line.strip().lower().startswith('thought:')), -1)
@@ -500,7 +501,17 @@ Your response (BLOCK or PASS):"""
                 if thought_line < action_line < action_input_line:
                     return True
             
-            # Valid format 2: Standalone final answer (at line start, no action field)
+            # Valid format 2: Action + Action Input (acceptable to avoid expensive microturn fix)
+            if has_action and has_action_input:
+                # Find line indices
+                action_line = next((i for i, line in enumerate(lines) if line.strip().lower().startswith('action:')), -1)
+                action_input_line = next((i for i, line in enumerate(lines) if line.strip().lower().startswith('action input:')), -1)
+                
+                # Ensure ordering: Action < Action Input
+                if action_line < action_input_line:
+                    return True
+            
+            # Valid format 3: Standalone final answer (at line start, no action field)
             has_final_answer = any(line.strip().lower().startswith('final answer:') for line in lines)
             if has_final_answer and not has_action:
                 return True
