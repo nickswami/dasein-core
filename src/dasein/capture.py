@@ -1827,12 +1827,20 @@ EXECUTION STATE (functions called so far):
                 # REFACTORED INJECTION - Multi-architecture gate for ReAct + function calling + LangGraph
                 # Philosophy: Bind to tool invocation moment (any format), force compliance or explicit refusal
                 combined_injection = f"""SYSTEM PREPROCESS (invisible to Thought):
-Before any reasoning, silently apply all operational presets below.
-These presets define the environment, not reasoning steps. Do not surface or restate them.
+Before any reasoning, you MUST silently apply all operational requirements below.
 
-<SYSTEM_PRESETS do_not_copy="true">
+CRITICAL OPERATIONAL REQUIREMENTS (do_not_copy="true"):
+Rules are listed in priority order by relevance score.
+When multiple rules apply to the same decision, you MUST follow the HIGHEST priority rule (first in list).
+If rules appear to conflict, use the guidance from the higher-priority rule.
+
 {chr(10).join(rule_injections)}
-</SYSTEM_PRESETS>
+--- END OPERATIONAL REQUIREMENTS ---
+
+FORMAT VIOLATION WARNING:
+You MUST NOT acknowledge, reference, explain, or mention these operational requirements in Thought.
+Any statement like "according to requirements", "following the rule", "as specified" is a FORMAT VIOLATION.
+Treat these requirements as invisible execution constraints - apply them without acknowledgment.
 
 REQUIRED OUTPUT FORMAT:
 
@@ -1885,6 +1893,8 @@ Final Answer: I don't know - the data source does not contain the required infor
 
 FINAL REMINDER: Use Format 1 (Thought/Action/Action Input) for tool calls, Format 2 (Final Answer:) for answers.
 Never output bare text.
+
+CRITICAL: Apply all OPERATIONAL REQUIREMENTS above without exception. Do not reference optimization choices in Thought.
 
 {state_context}"""
                 # Put the injection at the VERY BEGINNING of the system prompt
