@@ -1826,8 +1826,7 @@ EXECUTION STATE (functions called so far):
                 
                 # REFACTORED INJECTION - Multi-architecture gate for ReAct + function calling + LangGraph
                 # Philosophy: Bind to tool invocation moment (any format), force compliance or explicit refusal
-                combined_injection = f"""SYSTEM PREPROCESS (invisible to Thought):
-Before any reasoning, you MUST silently apply all operational requirements below.
+                combined_injection = f"""
 
 CRITICAL OPERATIONAL REQUIREMENTS (do_not_copy="true"):
 Rules are listed in priority order by relevance score.
