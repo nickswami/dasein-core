@@ -1830,16 +1830,18 @@ EXECUTION STATE (functions called so far):
 
 CRITICAL OPERATIONAL REQUIREMENTS (do_not_copy="true"):
 Rules are listed in priority order by relevance score.
-When multiple rules apply to the same decision, you MUST follow the HIGHEST priority rule (first in list).
-If rules appear to conflict, use the guidance from the higher-priority rule.
+When multiple rules apply to the same decision, you MUST follow the HIGHEST priority rule's directives (what tools to skip, what actions to take).
+Data and information from ALL applicable rules can be combined - only action directives conflict, not schema/column/context information.
+Rules may include schema/column/data information as helpful context - these are commonly useful subsets, not exhaustive inventories of what exists in tools.
+
+CRITICAL RULE INTERPRETATION (takes precedence over individual rule directives when they conflict):
+When rules specify "directly" (e.g., "USE X directly", "call Y directly"): Skip the redundant tools the rule identifies, not internal composition methods (CTEs, subqueries, nested loops, intermediate variables, parsed structures, multi-step compositions)
+When using multi-step logic (SQL CTEs, nested code structures, parsed data transformations, composed searches, intermediate calculations): Reasoning about structure in Thought is allowed when needed
+CRITICAL: You MUST push computation into tools (SQL aggregations/CTEs/subqueries, server-side filtering, code functions, API queries) - do NOT retrieve large amounts of raw data for processing in Thought, retrieve computed results WITH TOOLS instead
+FOR SKIP TOOL RULES: You MUST call the skipped tool to verify direct data is unavailable before using workarounds, proxies (like COUNT as volume, approximate calculations, estimated values), or concluding the task cannot be completed
 
 {chr(10).join(rule_injections)}
 --- END OPERATIONAL REQUIREMENTS ---
-
-CRITICAL RULE INTERPRETATION:
-When rules specify "directly" (e.g., "USE X directly", "call Y directly"): Skip the redundant tools the rule identifies, not internal composition methods (CTEs, subqueries, nested loops, intermediate variables, parsed structures, multi-step compositions)
-When using multi-step logic (SQL CTEs, nested code structures, parsed data transformations, composed searches, intermediate calculations): Reasoning about structure in Thought is allowed when needed
-CRITICAL: When computation can be pushed to tools rather than pulling data for LLM processing, you MUST use tool-side work (SQL aggregations/CTEs/subqueries, server-side filtering, code functions, targeted API queries) - whenever possible avoid retrieving large datasets for LLM-side processing
 
 FORMAT VIOLATION WARNING:
 You MUST NOT acknowledge, reference, explain, or mention these operational requirements in Thought.
@@ -1885,6 +1887,16 @@ Tool call:
 Thought: Extracting the main content for analysis.
 Action: extract_focused
 Action Input: {{"selector": "div.content"}}
+
+Tool call (verifying skipped tool for missing data):
+Thought: Rule provides columns A, B, C but I need column D for this calculation. Verifying schema before using workaround.
+Action: sql_db_schema
+Action Input: TableName
+
+Tool call (verifying skipped inspection for missing selector):
+Thought: Rule provides selectors X, Y but I need selector Z for extraction. Checking available elements before approximating.
+Action: inspect_page
+Action Input: {{"target": "metadata_section"}}
 
 Final answer:
 Final Answer: Based on the analysis, the value is 42.7 percent with an average of 1250 units.
