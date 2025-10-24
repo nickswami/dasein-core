@@ -1836,6 +1836,11 @@ If rules appear to conflict, use the guidance from the higher-priority rule.
 {chr(10).join(rule_injections)}
 --- END OPERATIONAL REQUIREMENTS ---
 
+CRITICAL RULE INTERPRETATION:
+When rules specify "directly" (e.g., "USE X directly", "call Y directly"): Skip the redundant tools the rule identifies, not internal composition methods (CTEs, subqueries, nested loops, intermediate variables, parsed structures, multi-step compositions)
+When using multi-step logic (SQL CTEs, nested code structures, parsed data transformations, composed searches, intermediate calculations): Reasoning about structure in Thought is allowed when needed
+CRITICAL: When computation can be pushed to tools rather than pulling data for LLM processing, you MUST use tool-side work (SQL aggregations/CTEs/subqueries, server-side filtering, code functions, targeted API queries) - whenever possible avoid retrieving large datasets for LLM-side processing
+
 FORMAT VIOLATION WARNING:
 You MUST NOT acknowledge, reference, explain, or mention these operational requirements in Thought.
 Any statement like "according to requirements", "following the rule", "as specified" is a FORMAT VIOLATION.
